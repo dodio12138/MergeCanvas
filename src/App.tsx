@@ -206,6 +206,24 @@ function App() {
   const cropImgRef = useRef<HTMLDivElement | null>(null)
   const previewScaleRef = useRef(1)
   const cropScrollRef = useRef(0)
+  const dragItemRef = useRef<string | null>(null)
+  const [dragOverId, setDragOverId] = useState<string | null>(null)
+  const [dragOverPos, setDragOverPos] = useState<'before' | 'after'>('before')
+
+  /* ---- drag-and-drop upload ---- */
+  useEffect(() => {
+    const onDragOver = (e: DragEvent) => { e.preventDefault(); if (e.dataTransfer) e.dataTransfer.dropEffect = e.dataTransfer.types.includes('Files') ? 'copy' : 'move' }
+    const onDrop = (e: DragEvent) => {
+      e.preventDefault()
+      // only handle external file drops, not internal reorder
+      if (e.dataTransfer?.types.includes('Files') && e.dataTransfer.files.length > 0) {
+        void onFileChange(e.dataTransfer.files)
+      }
+    }
+    document.addEventListener('dragover', onDragOver)
+    document.addEventListener('drop', onDrop)
+    return () => { document.removeEventListener('dragover', onDragOver); document.removeEventListener('drop', onDrop) }
+  })
 
   /* ---- warn before leaving when there is work in progress ---- */
   useEffect(() => {
@@ -470,11 +488,14 @@ function App() {
       }
 
       const quality = format === 'image/jpeg' ? jpgQuality : undefined
-      const url = offscreen.toDataURL(format, quality)
+      const blob = await new Promise<Blob | null>((resolve) => offscreen.toBlob(resolve, format, quality))
+      if (!blob) return
+      const url = URL.createObjectURL(blob)
       const a = document.createElement('a')
       a.href = url
       a.download = `mergecanvas-${Date.now()}.${format === 'image/png' ? 'png' : 'jpg'}`
       a.click()
+      setTimeout(() => URL.revokeObjectURL(url), 1000)
     } finally {
       setIsExporting(false)
     }
@@ -498,18 +519,15 @@ function App() {
     if (estW * estH > MAX_PIXELS) previewScale *= Math.sqrt(MAX_PIXELS / (estW * estH))
 
     // check text hit first (reverse order = top-most first)
-    const offscreen = document.createElement('canvas')
-    offscreen.width = canvas.width
-    offscreen.height = canvas.height
-    const tctx = offscreen.getContext('2d')
-    if (tctx) {
+    const ctx = canvas.getContext('2d')
+    if (ctx) {
       for (let i = texts.length - 1; i >= 0; i--) {
         const t = texts[i]
         if (!t.text.trim()) continue
         const fsPx = Math.round(t.fontSize * previewScale)
-        tctx.font = `${fsPx}px "Arial","PingFang SC",sans-serif`
+        ctx.font = `${fsPx}px "Arial","PingFang SC",sans-serif`
         const lines = t.text.split('\n')
-        const tw = Math.max(...lines.map((l) => tctx.measureText(l).width))
+        const tw = Math.max(...lines.map((l) => ctx.measureText(l).width))
         const tx = t.x * previewScale
         const ty = t.y * previewScale
         const th = fsPx * 1.2 * lines.length
@@ -656,7 +674,40 @@ function App() {
           </label>
           <ul className="list">
             {images.map((item, idx) => (
-              <li key={item.id} className={item.id === selectedId ? 'selected' : ''} onClick={() => { setSelectedId(item.id); requestAnimationFrame(() => { const r = imageRectsRef.current.find((rc) => rc.id === item.id); const canvas = canvasRef.current; if (r && canvas) { const canvasRect = canvas.getBoundingClientRect(); const ratio = canvas.clientWidth / canvas.width; const imgTop = canvasRect.top + window.scrollY + r.y * ratio; window.scrollTo({ top: imgTop - window.innerHeight / 3, behavior: 'smooth' }) } }) }}>
+              <li
+                key={item.id}
+                className={`${item.id === selectedId ? 'selected' : ''}${dragOverId === item.id ? (dragOverPos === 'before' ? ' drag-over-before' : ' drag-over-after') : ''}`}
+                draggable
+                onDragStart={(e) => { dragItemRef.current = item.id; e.dataTransfer.effectAllowed = 'move'; e.currentTarget.style.opacity = '0.4' }}
+                onDragEnd={(e) => { dragItemRef.current = null; e.currentTarget.style.opacity = ''; setDragOverId(null) }}
+                onDragOver={(e) => {
+                  e.preventDefault(); e.stopPropagation(); e.dataTransfer.dropEffect = 'move'
+                  if (!dragItemRef.current || dragItemRef.current === item.id) { setDragOverId(null); return }
+                  const rect = e.currentTarget.getBoundingClientRect()
+                  const pos = e.clientY < rect.top + rect.height / 2 ? 'before' : 'after'
+                  setDragOverId(item.id); setDragOverPos(pos)
+                }}
+                onDragLeave={() => { if (dragOverId === item.id) setDragOverId(null) }}
+                onDrop={(e) => {
+                  e.preventDefault()
+                  e.stopPropagation()
+                  setDragOverId(null)
+                  const fromId = dragItemRef.current
+                  if (!fromId || fromId === item.id) return
+                  setImages((prev) => {
+                    const arr = [...prev]
+                    const fi = arr.findIndex((i) => i.id === fromId)
+                    if (fi === -1) return prev
+                    const [moved] = arr.splice(fi, 1)
+                    let ti = arr.findIndex((i) => i.id === item.id)
+                    if (ti === -1) return prev
+                    if (dragOverPos === 'after') ti += 1
+                    arr.splice(ti, 0, moved)
+                    return arr
+                  })
+                }}
+                onClick={() => { setSelectedId(item.id); requestAnimationFrame(() => { const r = imageRectsRef.current.find((rc) => rc.id === item.id); const canvas = canvasRef.current; if (r && canvas) { const canvasRect = canvas.getBoundingClientRect(); const ratio = canvas.clientWidth / canvas.width; const imgTop = canvasRect.top + window.scrollY + r.y * ratio; window.scrollTo({ top: imgTop - window.innerHeight / 3, behavior: 'smooth' }) } }) }}
+              >
                 <div className="item-head">
                   <img className="thumb" src={item.url} alt="" draggable={false} />
                   <div>
@@ -730,12 +781,17 @@ function App() {
                 <button className="active" onClick={() => { setCropMode(false); requestAnimationFrame(() => { window.scrollTo({ top: cropScrollRef.current }) }) }}>完成裁切</button>
               </div>
             </div>
+          ) : images.length === 0 ? (
+            <div className="canvas-empty">
+              <p>📷</p>
+              <p>上传或拖入图片开始拼图</p>
+            </div>
           ) : (
             <div className="canvas-wrap">
               <canvas ref={canvasRef} onMouseDown={onCanvasMouseDown} onDoubleClick={onCanvasDoubleClick} style={{ cursor: 'crosshair', maxWidth: '100%', height: 'auto', willChange: 'transform' }} />
             </div>
           )}
-          <p className="tip">画布尺寸：{metrics.width} × {metrics.height}</p>
+          {images.length > 0 && <p className="tip">画布尺寸：{metrics.width} × {metrics.height}</p>}
         </section>
 
         {/* 右：设置 */}
