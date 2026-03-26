@@ -94,7 +94,7 @@ type ImageItem = {
   crop: Crop
 }
 
-const DEFAULT_PREVIEW_WIDTH = 1200
+const DEFAULT_PREVIEW_WIDTH = 600
 
 /* ---- pure helpers (no hooks / no state) ---- */
 
