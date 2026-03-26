@@ -146,10 +146,14 @@ function calcMetrics(
   return { width, height }
 }
 
+const imageCache = new Map<string, HTMLImageElement>()
+
 function loadImage(url: string) {
+  const cached = imageCache.get(url)
+  if (cached) return Promise.resolve(cached)
   return new Promise<HTMLImageElement>((resolve, reject) => {
     const img = new Image()
-    img.onload = () => resolve(img)
+    img.onload = () => { imageCache.set(url, img); resolve(img) }
     img.onerror = () => reject(new Error('图片加载失败'))
     img.src = url
   })
@@ -307,7 +311,7 @@ function App() {
   const removeImage = (id: string) => {
     setImages((prev) => {
       const t = prev.find((i) => i.id === id)
-      if (t) URL.revokeObjectURL(t.url)
+      if (t) { imageCache.delete(t.url); URL.revokeObjectURL(t.url) }
       return prev.filter((i) => i.id !== id)
     })
     if (selectedId === id) setSelectedId(null)
