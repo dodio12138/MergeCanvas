@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
+import exifr from 'exifr'
 import './App.css'
 
 /* ---- drag-number hook: double-click + drag up/down to adjust ---- */
@@ -46,13 +47,32 @@ function DragInput({ onValueChange, resetValue, ...props }: Omit<React.InputHTML
   onValueChange: (v: number) => void
   resetValue?: number
 }) {
+  const inputRef = useRef<HTMLInputElement | null>(null)
   const { onDoubleClick } = useDragNumber(
     Number(props.value),
     onValueChange,
     { min: Number(props.min ?? -Infinity), max: Number(props.max ?? Infinity), step: Number(props.step ?? 1) },
   )
+
+  useEffect(() => {
+    const el = inputRef.current
+    if (!el) return
+    const handler = (e: WheelEvent) => {
+      e.preventDefault()
+      const step = Number(props.step ?? 1)
+      const min = Number(props.min ?? -Infinity)
+      const max = Number(props.max ?? Infinity)
+      const delta = e.deltaY > 0 ? -step : step
+      const next = Math.min(max, Math.max(min, +(Number(props.value) + delta).toFixed(4)))
+      onValueChange(next)
+    }
+    el.addEventListener('wheel', handler, { passive: false })
+    return () => el.removeEventListener('wheel', handler)
+  })
+
   return (
     <input
+      ref={inputRef}
       {...props}
       onDoubleClick={(e) => {
         e.stopPropagation()
@@ -92,6 +112,7 @@ type ImageItem = {
   height: number
   scale: number
   crop: Crop
+  dateStr: string
 }
 
 const DEFAULT_PREVIEW_WIDTH = 600
@@ -175,11 +196,25 @@ function App() {
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [cropMode, setCropMode] = useState(false)
   const [maxPreviewWidth, setMaxPreviewWidth] = useState(DEFAULT_PREVIEW_WIDTH)
+  const [showDate, setShowDate] = useState(false)
+  const [dateFontSize, setDateFontSize] = useState(24)
+  const [dateColor, setDateColor] = useState('#ffffff')
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
   const imageRectsRef = useRef<{ id: string; x: number; y: number; w: number; h: number }[]>([])
   const dragRef = useRef<{ side: keyof Crop; startVal: number; startPos: number } | null>(null)
   const textDragRef = useRef<{ id: string; startX: number; startY: number; origX: number; origY: number } | null>(null)
   const cropImgRef = useRef<HTMLDivElement | null>(null)
+  const previewScaleRef = useRef(1)
+  const cropScrollRef = useRef(0)
+
+  /* ---- warn before leaving when there is work in progress ---- */
+  useEffect(() => {
+    const handler = (e: BeforeUnloadEvent) => {
+      if (images.length > 0) { e.preventDefault() }
+    }
+    window.addEventListener('beforeunload', handler)
+    return () => window.removeEventListener('beforeunload', handler)
+  }, [images.length])
 
   const selectedImage = images.find((i) => i.id === selectedId) ?? null
 
@@ -202,6 +237,7 @@ function App() {
     const estW = m.width * previewScale
     const estH = m.height * previewScale
     if (estW * estH > MAX_PIXELS) previewScale *= Math.sqrt(MAX_PIXELS / (estW * estH))
+    previewScaleRef.current = previewScale
 
     ;(async () => {
       const width = Math.max(1, Math.round(m.width * previewScale))
@@ -244,6 +280,19 @@ function App() {
         const srcW = img.naturalWidth * (1 - (item.crop.left + item.crop.right) / 100)
         const srcH = img.naturalHeight * (1 - (item.crop.top + item.crop.bottom) / 100)
         ctx.drawImage(img, srcX, srcY, srcW, srcH, dx, dy, dw, dh)
+
+        if (showDate && item.dateStr) {
+          const dfsPx = Math.round(dateFontSize * previewScale)
+          ctx.font = `${dfsPx}px "Arial","PingFang SC",sans-serif`
+          ctx.textBaseline = 'bottom'
+          const dm = ctx.measureText(item.dateStr)
+          const pad = 6 * previewScale
+          ctx.fillStyle = 'rgba(0,0,0,0.45)'
+          ctx.fillRect(dx + dw - dm.width - pad * 2, dy + dh - dfsPx - pad * 2, dm.width + pad * 2, dfsPx + pad * 2)
+          ctx.fillStyle = dateColor
+          ctx.fillText(item.dateStr, dx + dw - dm.width - pad, dy + dh - pad)
+        }
+
         rects.push({ id: item.id, x: dx, y: dy, w: dw, h: dh })
 
         if (direction === 'horizontal') cursorX += dw + gap * previewScale
@@ -288,7 +337,7 @@ function App() {
       }
     })()
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [images, direction, gap, bgColor, align, texts, selectedId, selectedTextId, cropMode, maxPreviewWidth])
+  }, [images, direction, gap, bgColor, align, texts, selectedId, selectedTextId, cropMode, maxPreviewWidth, showDate, dateFontSize, dateColor])
 
   /* ---- handlers ---- */
 
@@ -299,6 +348,17 @@ function App() {
       validFiles.map(async (file) => {
         const url = URL.createObjectURL(file)
         const img = await loadImage(url)
+        let dateStr = ''
+        try {
+          const exif = await exifr.parse(file, ['DateTimeOriginal', 'CreateDate'])
+          const d = exif?.DateTimeOriginal ?? exif?.CreateDate
+          if (d instanceof Date) {
+            dateStr = d.toLocaleDateString('zh-CN', { year: 'numeric', month: '2-digit', day: '2-digit' })
+          }
+        } catch { /* no EXIF */ }
+        if (!dateStr) {
+          dateStr = new Date(file.lastModified).toLocaleDateString('zh-CN', { year: 'numeric', month: '2-digit', day: '2-digit' })
+        }
         return {
           id: crypto.randomUUID(),
           file,
@@ -307,6 +367,7 @@ function App() {
           height: img.naturalHeight,
           scale: 1,
           crop: { top: 0, right: 0, bottom: 0, left: 0 },
+          dateStr,
         } satisfies ImageItem
       }),
     )
@@ -378,6 +439,19 @@ function App() {
         const srcW = img.naturalWidth * (1 - (item.crop.left + item.crop.right) / 100)
         const srcH = img.naturalHeight * (1 - (item.crop.top + item.crop.bottom) / 100)
         ctx.drawImage(img, srcX, srcY, srcW, srcH, dx, dy, dw, dh)
+
+        if (showDate && item.dateStr) {
+          const dfsPx = Math.round(dateFontSize * s)
+          ctx.font = `${dfsPx}px "Arial","PingFang SC",sans-serif`
+          ctx.textBaseline = 'bottom'
+          const dm = ctx.measureText(item.dateStr)
+          const pad = 6 * s
+          ctx.fillStyle = 'rgba(0,0,0,0.45)'
+          ctx.fillRect(dx + dw - dm.width - pad * 2, dy + dh - dfsPx - pad * 2, dm.width + pad * 2, dfsPx + pad * 2)
+          ctx.fillStyle = dateColor
+          ctx.fillText(item.dateStr, dx + dw - dm.width - pad, dy + dh - pad)
+        }
+
         if (direction === 'horizontal') cx += dw + gap * s
         else cy += dh + gap * s
       }
@@ -499,13 +573,23 @@ function App() {
       (r) => cx >= r.x && cx <= r.x + r.w && cy >= r.y && cy <= r.y + r.h,
     )
     if (hit) {
+      cropScrollRef.current = window.scrollY
       setSelectedId(hit.id)
       setCropMode(true)
     }
   }
 
   const addText = () => {
-    const t: TextItem = { id: crypto.randomUUID(), text: '文字', fontSize: 36, color: '#111111', padding: 20, x: 40, y: 40 }
+    let x = 40, y = 40
+    if (selectedId) {
+      const rect = imageRectsRef.current.find((r) => r.id === selectedId)
+      if (rect) {
+        const ps = previewScaleRef.current || 1
+        x = (rect.x + rect.w / 2) / ps
+        y = (rect.y + rect.h / 2) / ps
+      }
+    }
+    const t: TextItem = { id: crypto.randomUUID(), text: '文字', fontSize: 36, color: '#111111', padding: 20, x, y }
     setTexts((prev) => [...prev, t])
     setSelectedTextId(t.id)
   }
@@ -572,7 +656,7 @@ function App() {
           </label>
           <ul className="list">
             {images.map((item, idx) => (
-              <li key={item.id} className={item.id === selectedId ? 'selected' : ''} onClick={() => setSelectedId(item.id)}>
+              <li key={item.id} className={item.id === selectedId ? 'selected' : ''} onClick={() => { setSelectedId(item.id); requestAnimationFrame(() => { const r = imageRectsRef.current.find((rc) => rc.id === item.id); const canvas = canvasRef.current; if (r && canvas) { const canvasRect = canvas.getBoundingClientRect(); const ratio = canvas.clientWidth / canvas.width; const imgTop = canvasRect.top + window.scrollY + r.y * ratio; window.scrollTo({ top: imgTop - window.innerHeight / 3, behavior: 'smooth' }) } }) }}>
                 <div className="item-head">
                   <img className="thumb" src={item.url} alt="" draggable={false} />
                   <div>
@@ -599,7 +683,7 @@ function App() {
                       onValueChange={(v) => setImageScale(item.id, v)}
                     />
                     <div className="crop-controls">
-                      <button onClick={(e) => { e.stopPropagation(); setCropMode(true) }}>✂ 可视化裁切</button>
+                      <button onClick={(e) => { e.stopPropagation(); cropScrollRef.current = window.scrollY; setCropMode(true) }}>✂ 可视化裁切</button>
                       <div className="crop-grid">
                         {(['top', 'right', 'bottom', 'left'] as const).map((side) => (
                           <label key={side}>
@@ -628,7 +712,7 @@ function App() {
           <h2>预览 <span className="tip-inline">（点击画布选中图片）</span></h2>
           {cropMode && selectedImage ? (
             <div className="crop-editor">
-              <div className="crop-img-wrap" ref={cropImgRef} onDoubleClick={() => setCropMode(false)}>
+              <div className="crop-img-wrap" ref={cropImgRef} onDoubleClick={() => { setCropMode(false); requestAnimationFrame(() => { window.scrollTo({ top: cropScrollRef.current }) }) }}>
                 <img src={selectedImage.url} draggable={false} alt="" />
                 {/* 遮罩 */}
                 <div className="crop-mask" style={{ top: 0, left: 0, right: 0, height: `${selectedImage.crop.top}%` }} />
@@ -643,7 +727,7 @@ function App() {
               </div>
               <div className="crop-actions">
                 <button onClick={() => { if (selectedId) setImages((prev) => prev.map((i) => i.id === selectedId ? { ...i, crop: { top: 0, right: 0, bottom: 0, left: 0 } } : i)); }}>重置裁切</button>
-                <button className="active" onClick={() => setCropMode(false)}>完成裁切</button>
+                <button className="active" onClick={() => { setCropMode(false); requestAnimationFrame(() => { window.scrollTo({ top: cropScrollRef.current }) }) }}>完成裁切</button>
               </div>
             </div>
           ) : (
@@ -686,6 +770,22 @@ function App() {
             <label>背景色</label>
             <input type="color" value={bgColor} onChange={(e) => setBgColor(e.target.value)} />
           </div>
+
+          <div className="field">
+            <label><input type="checkbox" checked={showDate} onChange={(e) => setShowDate(e.target.checked)} /> 显示拍摄日期</label>
+          </div>
+          {showDate && (
+            <div className="field two">
+              <div>
+                <label>字号</label>
+                <DragInput type="number" min={10} max={120} value={dateFontSize} onValueChange={setDateFontSize} />
+              </div>
+              <div>
+                <label>颜色</label>
+                <input type="color" value={dateColor} onChange={(e) => setDateColor(e.target.value)} />
+              </div>
+            </div>
+          )}
 
           <h3>文字</h3>
           <button onClick={addText} style={{ marginBottom: 8 }}>+ 添加文字</button>
