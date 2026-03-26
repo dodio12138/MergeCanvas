@@ -196,7 +196,12 @@ function App() {
 
     const m = calcMetrics(images, direction, gap)
     const ut = getUniformTarget(images, direction)
-    const previewScale = ut > maxPreviewWidth ? maxPreviewWidth / ut : 1
+    let previewScale = ut > maxPreviewWidth ? maxPreviewWidth / ut : 1
+    // cap total pixels to keep canvas manageable for scrolling
+    const MAX_PIXELS = 4_000_000
+    const estW = m.width * previewScale
+    const estH = m.height * previewScale
+    if (estW * estH > MAX_PIXELS) previewScale *= Math.sqrt(MAX_PIXELS / (estW * estH))
 
     ;(async () => {
       const width = Math.max(1, Math.round(m.width * previewScale))
@@ -412,7 +417,11 @@ function App() {
 
     const m = calcMetrics(images, direction, gap)
     const ut = getUniformTarget(images, direction)
-    const previewScale = ut > maxPreviewWidth ? maxPreviewWidth / ut : 1
+    let previewScale = ut > maxPreviewWidth ? maxPreviewWidth / ut : 1
+    const MAX_PIXELS = 4_000_000
+    const estW = m.width * previewScale
+    const estH = m.height * previewScale
+    if (estW * estH > MAX_PIXELS) previewScale *= Math.sqrt(MAX_PIXELS / (estW * estH))
 
     // check text hit first (reverse order = top-most first)
     const offscreen = document.createElement('canvas')
@@ -639,7 +648,7 @@ function App() {
             </div>
           ) : (
             <div className="canvas-wrap">
-              <canvas ref={canvasRef} onMouseDown={onCanvasMouseDown} onDoubleClick={onCanvasDoubleClick} style={{ cursor: 'crosshair', maxWidth: '100%', height: 'auto' }} />
+              <canvas ref={canvasRef} onMouseDown={onCanvasMouseDown} onDoubleClick={onCanvasDoubleClick} style={{ cursor: 'crosshair', maxWidth: '100%', height: 'auto', willChange: 'transform' }} />
             </div>
           )}
           <p className="tip">画布尺寸：{metrics.width} × {metrics.height}</p>
