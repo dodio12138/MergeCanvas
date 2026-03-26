@@ -94,7 +94,7 @@ type ImageItem = {
   crop: Crop
 }
 
-const MAX_PREVIEW_WIDTH = 1200
+const DEFAULT_PREVIEW_WIDTH = 1200
 
 /* ---- pure helpers (no hooks / no state) ---- */
 
@@ -170,6 +170,7 @@ function App() {
   const [isExporting, setIsExporting] = useState(false)
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [cropMode, setCropMode] = useState(false)
+  const [maxPreviewWidth, setMaxPreviewWidth] = useState(DEFAULT_PREVIEW_WIDTH)
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
   const imageRectsRef = useRef<{ id: string; x: number; y: number; w: number; h: number }[]>([])
   const dragRef = useRef<{ side: keyof Crop; startVal: number; startPos: number } | null>(null)
@@ -191,7 +192,7 @@ function App() {
 
     const m = calcMetrics(images, direction, gap)
     const ut = getUniformTarget(images, direction)
-    const previewScale = ut > MAX_PREVIEW_WIDTH ? MAX_PREVIEW_WIDTH / ut : 1
+    const previewScale = ut > maxPreviewWidth ? maxPreviewWidth / ut : 1
 
     ;(async () => {
       const width = Math.max(1, Math.round(m.width * previewScale))
@@ -278,7 +279,7 @@ function App() {
       }
     })()
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [images, direction, gap, bgColor, align, texts, selectedId, selectedTextId, cropMode])
+  }, [images, direction, gap, bgColor, align, texts, selectedId, selectedTextId, cropMode, maxPreviewWidth])
 
   /* ---- handlers ---- */
 
@@ -407,7 +408,7 @@ function App() {
 
     const m = calcMetrics(images, direction, gap)
     const ut = getUniformTarget(images, direction)
-    const previewScale = ut > MAX_PREVIEW_WIDTH ? MAX_PREVIEW_WIDTH / ut : 1
+    const previewScale = ut > maxPreviewWidth ? maxPreviewWidth / ut : 1
 
     // check text hit first (reverse order = top-most first)
     const offscreen = document.createElement('canvas')
@@ -704,6 +705,11 @@ function App() {
               </li>
             ))}
           </ul>
+
+          <div className="field">
+            <label>预览质量：{maxPreviewWidth}px</label>
+            <DragInput type="range" min={400} max={3000} step={100} value={maxPreviewWidth} resetValue={DEFAULT_PREVIEW_WIDTH} onValueChange={setMaxPreviewWidth} />
+          </div>
 
           <h3>导出</h3>
           <div className="field">
