@@ -1,0 +1,439 @@
+:root {
+  font-family: 'Avenir Next', 'PingFang SC', 'Helvetica Neue', sans-serif;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  background:
+    radial-gradient(circle at 15% 10%, #ffe6c7 0, #ffe6c700 35%),
+    radial-gradient(circle at 85% 90%, #cfe8ff 0, #cfe8ff00 40%),
+    linear-gradient(135deg, #f7f3ea, #f2f7ff 45%, #eef6ef);
+  color: #1e2a36;
+}
+
+.app {
+  max-width: 1400px;
+  margin: 0 auto;
+  padding: 24px;
+}
+
+.top {
+  margin-bottom: 18px;
+}
+
+.top h1 {
+  margin: 0;
+  font-size: 44px;
+  letter-spacing: 0.02em;
+}
+
+.top p {
+  margin: 8px 0 0;
+  color: #405163;
+}
+
+.grid {
+  display: grid;
+  gap: 16px;
+  grid-template-columns: 1.1fr 1.8fr 1.1fr;
+  align-items: start;
+}
+
+.panel {
+  background: rgba(255, 255, 255, 0.72);
+  border: 1px solid rgba(255, 255, 255, 0.85);
+  border-radius: 18px;
+  padding: 14px;
+  backdrop-filter: blur(12px);
+  box-shadow: 0 12px 30px rgba(31, 42, 68, 0.08);
+}
+
+.grid > aside:first-child {
+  max-height: 85vh;
+  overflow-y: auto;
+  position: sticky;
+  top: 16px;
+}
+
+.grid > aside:last-child {
+  max-height: 85vh;
+  overflow-y: auto;
+  position: sticky;
+  top: 16px;
+}
+
+.panel h2,
+.panel h3 {
+  margin: 0 0 12px;
+}
+
+.upload {
+  display: inline-flex;
+  gap: 8px;
+  align-items: center;
+  background: #1f6feb;
+  color: #fff;
+  padding: 8px 12px;
+  border-radius: 10px;
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.upload input {
+  display: none;
+}
+
+.list {
+  list-style: none;
+  margin: 12px 0 0;
+  padding: 0;
+  display: grid;
+  gap: 10px;
+}
+
+.list li {
+  border: 1px solid #d9e3f0;
+  background: #ffffffc4;
+  border-radius: 10px;
+  padding: 8px;
+  cursor: pointer;
+  transition: border-color 0.15s;
+}
+
+.list li:hover {
+  border-color: #a0c4f1;
+}
+
+.list li.selected {
+  border-color: #1f6feb;
+  background: #eaf2fd;
+}
+
+.item-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 6px;
+}
+
+.item-head .thumb {
+  width: 40px;
+  height: 40px;
+  object-fit: cover;
+  border-radius: 6px;
+  flex-shrink: 0;
+  border: 1px solid #dbe4ef;
+}
+
+.item-head .row-btn {
+  margin-top: 0;
+  flex-shrink: 0;
+}
+
+.list strong {
+  display: block;
+  font-size: 13px;
+  word-break: break-all;
+}
+
+.list span {
+  font-size: 12px;
+  color: #607387;
+}
+
+.item-tools {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid #d0dce8;
+}
+
+.item-tools > label {
+  font-size: 12px;
+  color: #3f5368;
+  margin-bottom: 2px;
+  display: block;
+}
+
+.item-tools > input[type="range"] {
+  width: 100%;
+  margin-bottom: 6px;
+}
+
+.row-btn {
+  margin-top: 8px;
+  display: flex;
+  gap: 6px;
+}
+
+button,
+select,
+input {
+  font: inherit;
+}
+
+button {
+  border: 0;
+  border-radius: 8px;
+  padding: 7px 10px;
+  cursor: pointer;
+  background: #eef3f9;
+}
+
+button:hover {
+  background: #dde7f4;
+}
+
+button.active {
+  background: #1f6feb;
+  color: #fff;
+}
+
+button:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+.preview-panel {
+  min-height: 200px;
+}
+
+.canvas-wrap {
+  width: 100%;
+  overflow: auto;
+  border-radius: 12px;
+  border: 1px solid #dbe4ef;
+  background: repeating-conic-gradient(#edf2f8 0 25%, #fff 0 50%) 50% / 20px 20px;
+  padding: 8px;
+}
+
+.canvas-wrap canvas {
+  max-width: 100%;
+  height: auto;
+  display: block;
+  margin: 0 auto;
+}
+
+.tip {
+  margin-top: 10px;
+  color: #57708a;
+  font-size: 13px;
+}
+
+.field {
+  margin-bottom: 10px;
+}
+
+.field label {
+  display: block;
+  margin-bottom: 6px;
+  font-size: 13px;
+  color: #3f5368;
+}
+
+.field input,
+.field select {
+  width: 100%;
+  padding: 7px 8px;
+  border: 1px solid #c9d8e8;
+  border-radius: 9px;
+  background: #fff;
+}
+
+.field.two {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: 1fr 1fr;
+}
+
+.export-btns {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: 1fr 1fr;
+}
+
+.export-btns button {
+  background: #102b56;
+  color: #fff;
+  font-weight: 600;
+}
+
+.export-btns button:hover {
+  background: #18396e;
+}
+
+.tip-inline {
+  font-size: 13px;
+  font-weight: 400;
+  color: #8a9bb0;
+}
+
+.crop-controls {
+  width: 100%;
+  margin-top: 6px;
+}
+
+.crop-controls > button {
+  width: 100%;
+  margin-bottom: 6px;
+  background: #e0ecfa;
+  color: #1a4a8a;
+  font-size: 13px;
+  padding: 6px 0;
+}
+
+.crop-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr 1fr;
+  gap: 6px;
+}
+
+.crop-grid label {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  font-size: 12px;
+}
+
+.crop-grid input[type="number"] {
+  width: 52px;
+  padding: 3px 4px;
+  border: 1px solid #c0d0e0;
+  border-radius: 5px;
+  text-align: center;
+  font-size: 13px;
+}
+
+/* ---- Text List ---- */
+
+.text-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 6px;
+}
+
+.text-list li {
+  border: 1px solid #d9e3f0;
+  background: #ffffffc4;
+  border-radius: 8px;
+  padding: 8px;
+  cursor: pointer;
+}
+
+.text-list li.selected {
+  border-color: #1f6feb;
+  background: #eaf2fd;
+}
+
+.text-item-head {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.text-item-head textarea {
+  flex: 1;
+  padding: 4px 6px;
+  border: 1px solid #c9d8e8;
+  border-radius: 6px;
+  font-size: 13px;
+  background: #fff;
+  resize: vertical;
+  font-family: inherit;
+  line-height: 1.4;
+}
+
+.text-item-tools {
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px solid #d0dce8;
+}
+
+.text-item-tools .tip {
+  margin: 4px 0 0;
+  font-size: 11px;
+}
+
+/* ---- Crop Editor ---- */
+
+.crop-editor {
+  text-align: center;
+}
+
+.crop-img-wrap {
+  position: relative;
+  display: inline-block;
+  max-width: 100%;
+  user-select: none;
+  line-height: 0;
+}
+
+.crop-img-wrap img {
+  display: block;
+  max-width: 100%;
+  max-height: 60vh;
+  object-fit: contain;
+}
+
+.crop-mask {
+  position: absolute;
+  background: rgba(0, 0, 0, 0.45);
+  pointer-events: none;
+}
+
+.crop-handle {
+  position: absolute;
+  z-index: 2;
+}
+
+.crop-h {
+  left: 0;
+  right: 0;
+  height: 6px;
+  margin-top: -3px;
+  cursor: ns-resize;
+  background: rgba(31, 111, 235, 0.6);
+}
+
+.crop-h:hover,
+.crop-v:hover {
+  background: rgba(31, 111, 235, 0.9);
+}
+
+.crop-v {
+  top: 0;
+  bottom: 0;
+  width: 6px;
+  margin-left: -3px;
+  cursor: ew-resize;
+  background: rgba(31, 111, 235, 0.6);
+}
+
+.crop-actions {
+  margin-top: 10px;
+  display: flex;
+  gap: 8px;
+  justify-content: center;
+}
+
+.crop-actions button {
+  padding: 6px 16px;
+  font-size: 14px;
+}
+
+@media (max-width: 1024px) {
+  .grid {
+    grid-template-columns: 1fr;
+  }
+
+  .preview-panel {
+    min-height: auto;
+  }
+}
