@@ -1,4 +1,16 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
+
+// ---- 兼容 randomUUID ----
+function safeRandomUUID() {
+  if (typeof crypto !== 'undefined' && crypto.randomUUID) {
+    return crypto.randomUUID();
+  }
+  // fallback: 生成一个简单的 uuid v4
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function (c) {
+    const r = Math.random() * 16 | 0, v = c === 'x' ? r : (r & 0x3 | 0x8);
+    return v.toString(16);
+  });
+}
 import exifr from 'exifr'
 import './App.css'
 
@@ -564,7 +576,7 @@ function App() {
           dateStr = new Date(file.lastModified).toLocaleDateString('zh-CN', { year: 'numeric', month: '2-digit', day: '2-digit' })
         }
         return {
-          id: crypto.randomUUID(),
+          id: safeRandomUUID(),
           file,
           url,
           width: img.naturalWidth,
@@ -810,7 +822,7 @@ function App() {
         y = (rect.y + rect.h / 2) / ps
       }
     }
-    const t: TextItem = { id: crypto.randomUUID(), text: T.defaultText, fontSize: 60, color: '#ffffff', padding: 20, x, y }
+    const t: TextItem = { id: safeRandomUUID(), text: T.defaultText, fontSize: 60, color: '#ffffff', padding: 20, x, y }
     setTexts((prev) => [...prev, t])
     setSelectedTextId(t.id)
   }
