@@ -228,7 +228,7 @@ const i18n = {
     cropLeft: 'Left',
     preview: 'Preview',
     previewHint: '(click canvas to select)',
-    cropTip: 'Drag blue handles to adjust crop area, double-click to finish',
+    cropTip: 'Drag blue handles to crop; tap "Done" to finish (or double-click)',
     resetCrop: 'Reset crop',
     doneCrop: 'Done',
     emptyHint: 'Upload, drop, or paste images to start',
@@ -285,7 +285,7 @@ const i18n = {
     cropLeft: '左',
     preview: '预览',
     previewHint: '（点击画布选中图片）',
-    cropTip: '拖拽蓝色手柄调整裁切区域，双击完成',
+    cropTip: '拖拽蓝色手柄调整裁切区域，完成后点击"完成裁切"按钮',
     resetCrop: '重置裁切',
     doneCrop: '完成裁切',
     emptyHint: '上传、拖入或粘贴图片开始拼图',
@@ -351,6 +351,8 @@ function App() {
   const cropImgRef = useRef<HTMLDivElement | null>(null)
   const previewScaleRef = useRef(1)
   const cropScrollRef = useRef(0)
+  const lastTapRef = useRef<{ time: number; clientX: number; clientY: number } | null>(null)
+  const canvasTouchStartRef = useRef<{ clientX: number; clientY: number } | null>(null)
   const dragItemRef = useRef<string | null>(null)
   const [dragOverId, setDragOverId] = useState<string | null>(null)
   const [dragOverPos, setDragOverPos] = useState<'before' | 'after'>('before')
@@ -794,6 +796,52 @@ function App() {
     setSelectedTextId(null)
   }
 
+  const onCanvasTouchStart = (e: React.TouchEvent<HTMLCanvasElement>) => {
+    if (e.touches.length === 1) {
+      canvasTouchStartRef.current = { clientX: e.touches[0].clientX, clientY: e.touches[0].clientY }
+    }
+  }
+
+  const onCanvasTouchEnd = (e: React.TouchEvent<HTMLCanvasElement>) => {
+    if (e.changedTouches.length !== 1) return
+    const touch = e.changedTouches[0]
+    const start = canvasTouchStartRef.current
+    canvasTouchStartRef.current = null
+    // If touch moved significantly it was a scroll — ignore
+    if (start && (Math.abs(touch.clientX - start.clientX) > 10 || Math.abs(touch.clientY - start.clientY) > 10)) return
+    e.preventDefault() // suppress synthetic mouse events
+
+    const canvas = canvasRef.current
+    if (!canvas) return
+    const rect = canvas.getBoundingClientRect()
+    const sx = canvas.width / rect.width
+    const sy = canvas.height / rect.height
+    const cx = (touch.clientX - rect.left) * sx
+    const cy = (touch.clientY - rect.top) * sy
+
+    const now = Date.now()
+    const last = lastTapRef.current
+    const isDoubleTap = last &&
+      now - last.time < 300 &&
+      Math.abs(touch.clientX - last.clientX) < 40 &&
+      Math.abs(touch.clientY - last.clientY) < 40
+    lastTapRef.current = isDoubleTap ? null : { time: now, clientX: touch.clientX, clientY: touch.clientY }
+
+    const hit = [...imageRectsRef.current].reverse().find(
+      (r) => cx >= r.x && cx <= r.x + r.w && cy >= r.y && cy <= r.y + r.h,
+    )
+    if (isDoubleTap) {
+      if (hit) {
+        cropScrollRef.current = window.scrollY
+        setSelectedId(hit.id)
+        setCropMode(true)
+      }
+    } else {
+      setSelectedId(hit ? hit.id : null)
+      setSelectedTextId(null)
+    }
+  }
+
   const onCanvasDoubleClick = (e: React.MouseEvent<HTMLCanvasElement>) => {
     const canvas = canvasRef.current
     if (!canvas) return
@@ -836,38 +884,47 @@ function App() {
     setTexts((prev) => prev.map((t) => t.id === id ? { ...t, ...patch } : t))
   }
 
-  const startCropDrag = (side: keyof Crop, e: React.MouseEvent) => {
+  const startCropDrag = (side: keyof Crop, e: React.MouseEvent | React.TouchEvent) => {
     e.preventDefault()
-    if (!selectedImage) return
+    e.stopPropagation()
+    if (!selectedImage || !selectedId) return
+    const isVert = side === 'top' || side === 'bottom'
     const startVal = selectedImage.crop[side]
-    const startPos = side === 'top' || side === 'bottom' ? e.clientY : e.clientX
+    const nativeEv = e.nativeEvent
+    const startPos = 'touches' in nativeEv
+      ? (isVert ? nativeEv.touches[0].clientY : nativeEv.touches[0].clientX)
+      : (isVert ? (nativeEv as MouseEvent).clientY : (nativeEv as MouseEvent).clientX)
     dragRef.current = { side, startVal, startPos }
+    const capturedId = selectedId
 
-    const onMove = (ev: MouseEvent) => {
+    const applyMove = (clientX: number, clientY: number) => {
       const d = dragRef.current
-      if (!d || !cropImgRef.current || !selectedId) return
+      if (!d || !cropImgRef.current) return
       const rect = cropImgRef.current.getBoundingClientRect()
-      const isVert = d.side === 'top' || d.side === 'bottom'
       const total = isVert ? rect.height : rect.width
-      const delta = ((isVert ? ev.clientY : ev.clientX) - d.startPos) / total * 100
-      let newVal: number
-      if (d.side === 'top' || d.side === 'left') {
-        newVal = d.startVal + delta
-      } else {
-        newVal = d.startVal - delta
-      }
+      const pos = isVert ? clientY : clientX
+      const delta = (pos - d.startPos) / total * 100
+      let newVal = (d.side === 'top' || d.side === 'left')
+        ? d.startVal + delta
+        : d.startVal - delta
       newVal = Math.min(49, Math.max(0, Math.round(newVal)))
-      setImageCrop(selectedId, d.side, newVal)
+      setImageCrop(capturedId, d.side, newVal)
     }
 
-    const onUp = () => {
+    const onMouseMove = (ev: MouseEvent) => applyMove(ev.clientX, ev.clientY)
+    const onTouchMove = (ev: TouchEvent) => { ev.preventDefault(); applyMove(ev.touches[0].clientX, ev.touches[0].clientY) }
+    const onEnd = () => {
       dragRef.current = null
-      document.removeEventListener('mousemove', onMove)
-      document.removeEventListener('mouseup', onUp)
+      document.removeEventListener('mousemove', onMouseMove)
+      document.removeEventListener('mouseup', onEnd)
+      document.removeEventListener('touchmove', onTouchMove)
+      document.removeEventListener('touchend', onEnd)
     }
 
-    document.addEventListener('mousemove', onMove)
-    document.addEventListener('mouseup', onUp)
+    document.addEventListener('mousemove', onMouseMove)
+    document.addEventListener('mouseup', onEnd)
+    document.addEventListener('touchmove', onTouchMove, { passive: false })
+    document.addEventListener('touchend', onEnd)
   }
 
   /* ---- JSX ---- */
@@ -1001,10 +1058,10 @@ function App() {
                 <div className="crop-mask" style={{ top: `${selectedImage.crop.top}%`, left: 0, bottom: `${selectedImage.crop.bottom}%`, width: `${selectedImage.crop.left}%` }} />
                 <div className="crop-mask" style={{ top: `${selectedImage.crop.top}%`, right: 0, bottom: `${selectedImage.crop.bottom}%`, width: `${selectedImage.crop.right}%` }} />
                 {/* 拖拽手柄 */}
-                <div className="crop-handle crop-h" style={{ top: `${selectedImage.crop.top}%` }} onMouseDown={(e) => startCropDrag('top', e)} />
-                <div className="crop-handle crop-h" style={{ bottom: `${selectedImage.crop.bottom}%` }} onMouseDown={(e) => startCropDrag('bottom', e)} />
-                <div className="crop-handle crop-v" style={{ left: `${selectedImage.crop.left}%` }} onMouseDown={(e) => startCropDrag('left', e)} />
-                <div className="crop-handle crop-v" style={{ right: `${selectedImage.crop.right}%` }} onMouseDown={(e) => startCropDrag('right', e)} />
+                <div className="crop-handle crop-h" style={{ top: `${selectedImage.crop.top}%` }} onMouseDown={(e) => startCropDrag('top', e)} onTouchStart={(e) => startCropDrag('top', e)} />
+                <div className="crop-handle crop-h" style={{ bottom: `${selectedImage.crop.bottom}%`, transform: 'translateY(50%)' }} onMouseDown={(e) => startCropDrag('bottom', e)} onTouchStart={(e) => startCropDrag('bottom', e)} />
+                <div className="crop-handle crop-v" style={{ left: `${selectedImage.crop.left}%` }} onMouseDown={(e) => startCropDrag('left', e)} onTouchStart={(e) => startCropDrag('left', e)} />
+                <div className="crop-handle crop-v" style={{ right: `${selectedImage.crop.right}%`, transform: 'translateX(50%)' }} onMouseDown={(e) => startCropDrag('right', e)} onTouchStart={(e) => startCropDrag('right', e)} />
               </div>
               <div className="crop-actions">
                 <button onClick={() => { if (selectedId) setImages((prev) => prev.map((i) => i.id === selectedId ? { ...i, crop: { top: 0, right: 0, bottom: 0, left: 0 } } : i)); }}>{T.resetCrop}</button>
@@ -1022,7 +1079,7 @@ function App() {
             </div>
           ) : (
             <div className={`canvas-wrap${fileDragOver ? ' drag-highlight' : ''}`}>
-              <canvas ref={canvasRef} onMouseDown={onCanvasMouseDown} onDoubleClick={onCanvasDoubleClick} style={{ cursor: 'crosshair', maxWidth: '100%', height: 'auto', willChange: 'transform' }} />
+              <canvas ref={canvasRef} onMouseDown={onCanvasMouseDown} onDoubleClick={onCanvasDoubleClick} onTouchStart={onCanvasTouchStart} onTouchEnd={onCanvasTouchEnd} style={{ cursor: 'crosshair', maxWidth: '100%', height: 'auto', willChange: 'transform' }} />
             </div>
           )}
           {images.length > 0 && <p className="tip">{T.canvasSize}：{metrics.width} × {metrics.height}</p>}
