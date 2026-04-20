@@ -1261,3 +1261,81 @@ input[type="number"]::-webkit-outer-spin-button {
 .footer a:hover {
   text-decoration: underline;
 }
+
+.heic-progress-cancel {
+  margin-top: 8px;
+  padding: 4px 12px;
+  font-size: 13px;
+  background: #ef5350;
+  color: #fff;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.heic-progress-cancel:hover {
+  background: #e53935;
+}
+
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.4);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+  animation: modal-fade-in 0.2s ease;
+}
+
+.modal-box {
+  background: #fff;
+  border-radius: 12px;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.15);
+  padding: 24px;
+  max-width: 320px;
+  text-align: center;
+  z-index: 1001;
+}
+
+.modal-title {
+  font-size: 16px;
+  font-weight: 600;
+  color: #1e2a36;
+  margin: 0 0 8px;
+}
+
+.modal-msg {
+  font-size: 14px;
+  color: #666;
+  margin: 0 0 20px;
+}
+
+.modal-buttons {
+  display: flex;
+  gap: 10px;
+  justify-content: center;
+}
+
+.modal-buttons button {
+  padding: 8px 16px;
+  font-size: 14px;
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: background 0.2s ease;
+}
+
+.btn-cancel {
+  background: #e0e0e0;
+  color: #333;
+}
+
+.btn-cancel:hover {
+  background: #d0d0d0;
+}
+
+@keyframes modal-fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}

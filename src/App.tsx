@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
 // ---- 兼容 randomUUID ----
 function safeRandomUUID() {
@@ -11,8 +11,6 @@ function safeRandomUUID() {
     return v.toString(16);
   });
 }
-import exifr from 'exifr'
-import heic2any from 'heic2any'
 import './App.css'
 
 /* ---- drag-number hook: double-click + drag up/down to adjust ---- */
@@ -424,6 +422,8 @@ const i18n = {
     reverse: '🔄 Reverse',
     clearAll: 'Clear all',
     clear: '🗑 Clear',
+    confirmClear: 'Clear all images?',
+    confirmClearMsg: 'This action cannot be undone.',
     moveUp: 'Move up',
     moveDown: 'Move down',
     deleteTip: 'Delete',
@@ -473,6 +473,7 @@ const i18n = {
     estSize: 'Est. size',
     footerText: 'MergeCanvas — Images processed locally, never uploaded',
     exported: 'Exported',
+    exportFailed: 'Export failed, please try again',
     defaultText: 'Text',
     unsupportedFiles: 'Unsupported file(s) skipped',
     heicConverting: 'Converting HEIC…',
@@ -488,6 +489,8 @@ const i18n = {
     reverse: '🔄 反转',
     clearAll: '清空全部',
     clear: '🗑 清空',
+    confirmClear: '清空全部图片？',
+    confirmClearMsg: '此操作无法撤销。',
     moveUp: '上移',
     moveDown: '下移',
     deleteTip: '删除 (Delete)',
@@ -538,6 +541,7 @@ const i18n = {
     footerText: 'MergeCanvas — 图片在本地处理，不会上传到服务器',
     exported: '已导出',
     defaultText: '文字',
+    exportFailed: '导出失败，请重试',
     unsupportedFiles: '不支持的文件已跳过',
     heicConverting: 'HEIC 转换中…',
     heicConvertError: 'HEIC 文件转换失败',
@@ -560,6 +564,7 @@ function App() {
   const [exportScale, setExportScale] = useState(1)
   const [isExporting, setIsExporting] = useState(false)
   const [heicProgress, setHeicProgress] = useState<{ done: number; total: number } | null>(null)
+  const [showClearConfirm, setShowClearConfirm] = useState(false)
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [cropMode, setCropMode] = useState(false)
   const [cropPreset, setCropPreset] = useState<CropRatioPreset>('free')
@@ -569,6 +574,7 @@ function App() {
   const [dateColor, setDateColor] = useState('#ffffff')
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
   const imageRectsRef = useRef<{ id: string; x: number; y: number; w: number; h: number }[]>([])
+  const textRectsRef = useRef<{ id: string; x: number; y: number; w: number; h: number }[]>([])
   const dragRef = useRef<{ target: CropDragTarget; startX: number; startY: number; startCrop: Crop; mode: 'edge' | 'corner' | 'move' } | null>(null)
   const textDragRef = useRef<{ id: string; startX: number; startY: number; origX: number; origY: number } | null>(null)
   const cropImgRef = useRef<HTMLDivElement | null>(null)
@@ -578,6 +584,7 @@ function App() {
   const lastTapRef = useRef<{ time: number; clientX: number; clientY: number } | null>(null)
   const canvasTouchStartRef = useRef<{ clientX: number; clientY: number } | null>(null)
   const dragItemRef = useRef<string | null>(null)
+  const heicAbortRef = useRef<AbortController | null>(null)
   const [dragOverId, setDragOverId] = useState<string | null>(null)
   const [dragOverPos, setDragOverPos] = useState<'before' | 'after'>('before')
   const [toast, setToast] = useState('')
@@ -590,7 +597,9 @@ function App() {
   const showToast = (msg: string) => {
     setToast(msg)
     clearTimeout(toastTimer.current)
-    toastTimer.current = setTimeout(() => setToast(''), 2500)
+    // Dynamic timeout: base 2s + 0.1s per character
+    const timeout = Math.max(2500, msg.length * 100 + 1500)
+    toastTimer.current = setTimeout(() => setToast(''), timeout)
   }
 
   /* ---- drag-and-drop upload ---- */
@@ -629,7 +638,15 @@ function App() {
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement || e.target instanceof HTMLSelectElement) return
-      if (e.key === 'Escape') { setSelectedId(null); setSelectedTextId(null) }
+      if (e.key === 'Escape') {
+        if (cropMode) {
+          setCropMode(false)
+          requestAnimationFrame(() => { window.scrollTo({ top: cropScrollRef.current }) })
+        } else {
+          setSelectedId(null)
+          setSelectedTextId(null)
+        }
+      }
       if ((e.key === 'Delete' || e.key === 'Backspace') && selectedId && !cropMode) {
         e.preventDefault(); removeImage(selectedId)
       }
@@ -674,7 +691,7 @@ function App() {
     setMaxPreviewWidth((prev) => Math.min(prev, previewQualityMax))
   }, [previewQualityMax])
 
-  const metrics = calcMetrics(images, direction, gap)
+  const metrics = useMemo(() => calcMetrics(images, direction, gap), [images, direction, gap])
 
   /* ---- preview effect: 依赖项变化时重绘预览画布 ---- */
 
@@ -685,7 +702,7 @@ function App() {
     const canvas = canvasRef.current
     if (!canvas) return
 
-    const m = calcMetrics(images, direction, gap)
+    const m = metrics
     const ut = getUniformTarget(images, direction)
     let previewScale = ut > maxPreviewWidth ? maxPreviewWidth / ut : 1
     // cap total pixels to keep canvas manageable for scrolling
@@ -770,6 +787,7 @@ function App() {
 
       imageRectsRef.current = rects
 
+      const newTextRects: { id: string; x: number; y: number; w: number; h: number }[] = []
       for (const t of texts) {
         if (t.text.trim()) {
           const fsPx = Math.round(t.fontSize * previewScale)
@@ -781,8 +799,9 @@ function App() {
           for (let li = 0; li < lines.length; li++) {
             ctx.fillText(lines[li], t.x * previewScale, t.y * previewScale + li * lineH)
           }
+          const maxW = Math.max(...lines.map((l) => ctx.measureText(l).width))
+          newTextRects.push({ id: t.id, x: t.x * previewScale, y: t.y * previewScale, w: maxW, h: lineH * lines.length })
           if (t.id === selectedTextId) {
-            const maxW = Math.max(...lines.map((l) => ctx.measureText(l).width))
             ctx.strokeStyle = '#1f6feb'
             ctx.lineWidth = 2
             ctx.setLineDash([4, 3])
@@ -791,8 +810,9 @@ function App() {
           }
         }
       }
+      textRectsRef.current = newTextRects
     })()
-  }, [images, direction, gap, bgColor, align, texts, selectedId, selectedTextId, cropMode, maxPreviewWidth, showDate, dateFontSize, dateColor])
+  }, [metrics, images, direction, gap, bgColor, align, texts, selectedId, selectedTextId, cropMode, maxPreviewWidth, showDate, dateFontSize, dateColor])
 
   /* ---- handlers ---- */
 
@@ -820,8 +840,11 @@ function App() {
     // Convert HEIC files to JPEG blobs
     const convertedFiles: File[] = []
     if (heicFiles.length > 0) {
+      const heic2any = (await import('heic2any')).default
       setHeicProgress({ done: 0, total: heicFiles.length })
+      heicAbortRef.current = new AbortController()
       for (let i = 0; i < heicFiles.length; i++) {
+        if (heicAbortRef.current?.signal.aborted) break
         const hf = heicFiles[i]
         try {
           const result = await heic2any({ blob: hf, toType: 'image/jpeg', quality: 0.92 })
@@ -829,14 +852,18 @@ function App() {
           const converted = new File([blob], hf.name.replace(/\.heic$/i, '.jpg').replace(/\.heif$/i, '.jpg'), { type: 'image/jpeg' })
           convertedFiles.push(converted)
         } catch {
+          if (heicAbortRef.current?.signal.aborted) break
           showToast(`⚠️ ${T.heicConvertError}：${hf.name}`)
         }
         setHeicProgress({ done: i + 1, total: heicFiles.length })
       }
       setHeicProgress(null)
+      heicAbortRef.current = null
     }
     const validFiles = [...supported, ...convertedFiles]
     if (validFiles.length === 0) return
+    const exifr = (await import('exifr')).default
+    const dateLocale = lang === 'zh' ? 'zh-CN' : 'en-US'
     const loaded = await Promise.all(
       validFiles.map(async (file) => {
         const url = URL.createObjectURL(file)
@@ -846,11 +873,11 @@ function App() {
           const exif = await exifr.parse(file, ['DateTimeOriginal', 'CreateDate'])
           const d = exif?.DateTimeOriginal ?? exif?.CreateDate
           if (d instanceof Date) {
-            dateStr = d.toLocaleDateString('zh-CN', { year: 'numeric', month: '2-digit', day: '2-digit' })
+            dateStr = d.toLocaleDateString(dateLocale, { year: 'numeric', month: '2-digit', day: '2-digit' })
           }
         } catch { /* no EXIF */ }
         if (!dateStr) {
-          dateStr = new Date(file.lastModified).toLocaleDateString('zh-CN', { year: 'numeric', month: '2-digit', day: '2-digit' })
+          dateStr = new Date(file.lastModified).toLocaleDateString(dateLocale, { year: 'numeric', month: '2-digit', day: '2-digit' })
         }
         return {
           id: safeRandomUUID(),
@@ -878,6 +905,11 @@ function App() {
   }
 
   const clearAllImages = () => {
+    setShowClearConfirm(true)
+  }
+
+  const confirmClearAll = () => {
+    setShowClearConfirm(false)
     images.forEach((i) => { imageCache.delete(i.url); URL.revokeObjectURL(i.url) })
     setImages([])
     setSelectedId(null)
@@ -1029,7 +1061,7 @@ function App() {
 
       const quality = format === 'image/jpeg' ? jpgQuality : undefined
       const blob = await new Promise<Blob | null>((resolve) => offscreen.toBlob(resolve, format, quality))
-      if (!blob) return
+      if (!blob) { showToast(`⚠️ ${T.exportFailed}`); return }
       const url = URL.createObjectURL(blob)
       const a = document.createElement('a')
       a.href = url
@@ -1051,64 +1083,48 @@ function App() {
     const cx = (e.clientX - rect.left) * sx
     const cy = (e.clientY - rect.top) * sy
 
-    const m = calcMetrics(images, direction, gap)
-    const ut = getUniformTarget(images, direction)
-    let previewScale = ut > maxPreviewWidth ? maxPreviewWidth / ut : 1
-    const MAX_PIXELS = 4_000_000
-    const estW = m.width * previewScale
-    const estH = m.height * previewScale
-    if (estW * estH > MAX_PIXELS) previewScale *= Math.sqrt(MAX_PIXELS / (estW * estH))
-
-    // check text hit first (reverse order = top-most first)
-    const ctx = canvas.getContext('2d')
-    if (ctx) {
-      for (let i = texts.length - 1; i >= 0; i--) {
-        const t = texts[i]
-        if (!t.text.trim()) continue
-        const fsPx = Math.round(t.fontSize * previewScale)
-        ctx.font = `${fsPx}px "Arial","PingFang SC",sans-serif`
-        const lines = t.text.split('\n')
-        const tw = Math.max(...lines.map((l) => ctx.measureText(l).width))
-        const tx = t.x * previewScale
-        const ty = t.y * previewScale
-        const th = fsPx * 1.2 * lines.length
-        if (cx >= tx && cx <= tx + tw && cy >= ty && cy <= ty + th) {
-          setSelectedTextId(t.id)
-          setSelectedId(null)
-          textDragRef.current = { id: t.id, startX: e.clientX, startY: e.clientY, origX: t.x, origY: t.y }
-          const canvasW = m.width
-          const canvasH = m.height
-          const scaleX = rect.width / canvasW
-          const scaleY = rect.height / canvasH
-          const onMove = (ev: MouseEvent) => {
-            const d = textDragRef.current
-            if (!d) return
-            const rawX = Math.round(d.origX + (ev.clientX - d.startX) / scaleX)
-            const rawY = Math.round(d.origY + (ev.clientY - d.startY) / scaleY)
-            setTexts((prev) => prev.map((tt) => {
-              if (tt.id !== d.id) return tt
-              const pad = tt.padding
-              let nx = rawX, ny = rawY
-              // snap X: left-edge, center, right-edge
-              if (Math.abs(nx - pad) < SNAP_THRESHOLD) nx = pad
-              else if (Math.abs(nx - Math.round(canvasW / 2)) < SNAP_THRESHOLD) nx = Math.round(canvasW / 2)
-              else if (Math.abs(nx - (canvasW - pad)) < SNAP_THRESHOLD) nx = canvasW - pad
-              // snap Y: top-edge, center, bottom-edge
-              if (Math.abs(ny - pad) < SNAP_THRESHOLD) ny = pad
-              else if (Math.abs(ny - Math.round(canvasH / 2)) < SNAP_THRESHOLD) ny = Math.round(canvasH / 2)
-              else if (Math.abs(ny - (canvasH - pad)) < SNAP_THRESHOLD) ny = canvasH - pad
-              return { ...tt, x: nx, y: ny }
-            }))
-          }
-          const onUp = () => {
-            textDragRef.current = null
-            document.removeEventListener('mousemove', onMove)
-            document.removeEventListener('mouseup', onUp)
-          }
-          document.addEventListener('mousemove', onMove)
-          document.addEventListener('mouseup', onUp)
-          return
+    // check text hit first using cached rects (reverse order = top-most first)
+    const textHit = [...textRectsRef.current].reverse().find(
+      (r) => cx >= r.x && cx <= r.x + r.w && cy >= r.y && cy <= r.y + r.h
+    )
+    if (textHit) {
+      const t = texts.find((tt) => tt.id === textHit.id)
+      if (t) {
+        setSelectedTextId(t.id)
+        setSelectedId(null)
+        textDragRef.current = { id: t.id, startX: e.clientX, startY: e.clientY, origX: t.x, origY: t.y }
+        const canvasW = metrics.width
+        const canvasH = metrics.height
+        const scaleX = rect.width / canvasW
+        const scaleY = rect.height / canvasH
+        const onMove = (ev: MouseEvent) => {
+          const d = textDragRef.current
+          if (!d) return
+          const rawX = Math.round(d.origX + (ev.clientX - d.startX) / scaleX)
+          const rawY = Math.round(d.origY + (ev.clientY - d.startY) / scaleY)
+          setTexts((prev) => prev.map((tt) => {
+            if (tt.id !== d.id) return tt
+            const pad = tt.padding
+            let nx = rawX, ny = rawY
+            // snap X: left-edge, center, right-edge
+            if (Math.abs(nx - pad) < SNAP_THRESHOLD) nx = pad
+            else if (Math.abs(nx - Math.round(canvasW / 2)) < SNAP_THRESHOLD) nx = Math.round(canvasW / 2)
+            else if (Math.abs(nx - (canvasW - pad)) < SNAP_THRESHOLD) nx = canvasW - pad
+            // snap Y: top-edge, center, bottom-edge
+            if (Math.abs(ny - pad) < SNAP_THRESHOLD) ny = pad
+            else if (Math.abs(ny - Math.round(canvasH / 2)) < SNAP_THRESHOLD) ny = Math.round(canvasH / 2)
+            else if (Math.abs(ny - (canvasH - pad)) < SNAP_THRESHOLD) ny = canvasH - pad
+            return { ...tt, x: nx, y: ny }
+          }))
         }
+        const onUp = () => {
+          textDragRef.current = null
+          document.removeEventListener('mousemove', onMove)
+          document.removeEventListener('mouseup', onUp)
+        }
+        document.addEventListener('mousemove', onMove)
+        document.addEventListener('mouseup', onUp)
+        return
       }
     }
 
@@ -1649,6 +1665,19 @@ function App() {
           <span className="heic-progress-label">{T.heicConverting} {heicProgress.done}/{heicProgress.total}</span>
           <div className="heic-progress-bar-track">
             <div className="heic-progress-bar-fill" style={{ width: `${Math.round(heicProgress.done / heicProgress.total * 100)}%` }} />
+          </div>
+          <button className="heic-progress-cancel" onClick={() => { heicAbortRef.current?.abort(); setHeicProgress(null) }}>Cancel</button>
+        </div>
+      )}
+      {showClearConfirm && (
+        <div className="modal-overlay" onClick={() => setShowClearConfirm(false)}>
+          <div className="modal-box" onClick={(e) => e.stopPropagation()}>
+            <p className="modal-title">{T.confirmClear}</p>
+            <p className="modal-msg">{T.confirmClearMsg}</p>
+            <div className="modal-buttons">
+              <button className="btn-cancel" onClick={() => setShowClearConfirm(false)}>Cancel</button>
+              <button className="btn-danger" onClick={confirmClearAll}>Clear</button>
+            </div>
           </div>
         </div>
       )}
