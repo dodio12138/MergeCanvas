@@ -2,6 +2,7 @@
   "name": "mergecanvas",
   "private": true,
   "version": "0.0.0",
+  "description": "MergeCanvas is a browser-based lossless image stitching and annotation tool that runs fully locally with no uploads or backend.",
   "type": "module",
   "scripts": {
     "dev": "vite",
