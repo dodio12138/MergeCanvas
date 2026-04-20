@@ -12,6 +12,7 @@ function safeRandomUUID() {
   });
 }
 import exifr from 'exifr'
+import heic2any from 'heic2any'
 import './App.css'
 
 /* ---- drag-number hook: double-click + drag up/down to adjust ---- */
@@ -67,9 +68,15 @@ function DragInput({ onValueChange, resetValue, ...props }: Omit<React.InputHTML
   )
 
   const valueRef = useRef(Number(props.value))
-  valueRef.current = Number(props.value)
   const onValueChangeRef = useRef(onValueChange)
-  onValueChangeRef.current = onValueChange
+
+  useEffect(() => {
+    valueRef.current = Number(props.value)
+  }, [props.value])
+
+  useEffect(() => {
+    onValueChangeRef.current = onValueChange
+  }, [onValueChange])
 
   useEffect(() => {
     const el = inputRef.current
@@ -108,6 +115,9 @@ type Direction = 'horizontal' | 'vertical'
 type Align = 'start' | 'center' | 'end'
 
 type Crop = { top: number; right: number; bottom: number; left: number }
+type CropSide = keyof Crop
+type CropCorner = 'top-left' | 'top-right' | 'bottom-left' | 'bottom-right'
+type CropDragTarget = CropSide | CropCorner | 'move'
 
 type TextItem = {
   id: string
@@ -133,7 +143,21 @@ type ImageItem = {
   fileSize: number
 }
 
+const CROP_RATIO_PRESETS = [
+  { value: 'free', ratio: null },
+  { value: '1:1', ratio: 1 },
+  { value: '4:3', ratio: 4 / 3 },
+  { value: '3:4', ratio: 3 / 4 },
+  { value: '16:9', ratio: 16 / 9 },
+  { value: '9:16', ratio: 9 / 16 },
+  { value: '3:2', ratio: 3 / 2 },
+  { value: '2:3', ratio: 2 / 3 },
+] as const
+
+type CropRatioPreset = (typeof CROP_RATIO_PRESETS)[number]['value']
+
 const DEFAULT_PREVIEW_WIDTH = 600
+const CROP_SUM_LIMIT = 99
 
 function formatFileSize(bytes: number) {
   if (bytes < 1024) return bytes + ' B'
@@ -191,6 +215,189 @@ function calcMetrics(
   return { width, height }
 }
 
+function finalizeCrop(crop: Crop): Crop {
+  let next = {
+    top: Math.min(CROP_SUM_LIMIT, Math.max(0, crop.top)),
+    right: Math.min(CROP_SUM_LIMIT, Math.max(0, crop.right)),
+    bottom: Math.min(CROP_SUM_LIMIT, Math.max(0, crop.bottom)),
+    left: Math.min(CROP_SUM_LIMIT, Math.max(0, crop.left)),
+  }
+
+  const hOver = next.left + next.right - CROP_SUM_LIMIT
+  if (hOver > 0) {
+    if (next.left >= next.right) next.left -= hOver
+    else next.right -= hOver
+  }
+  const vOver = next.top + next.bottom - CROP_SUM_LIMIT
+  if (vOver > 0) {
+    if (next.top >= next.bottom) next.top -= vOver
+    else next.bottom -= vOver
+  }
+
+  next = {
+    top: Math.min(CROP_SUM_LIMIT, Math.max(0, Math.round(next.top))),
+    right: Math.min(CROP_SUM_LIMIT, Math.max(0, Math.round(next.right))),
+    bottom: Math.min(CROP_SUM_LIMIT, Math.max(0, Math.round(next.bottom))),
+    left: Math.min(CROP_SUM_LIMIT, Math.max(0, Math.round(next.left))),
+  }
+
+  const hOverRound = next.left + next.right - CROP_SUM_LIMIT
+  if (hOverRound > 0) {
+    if (next.left >= next.right) next.left -= hOverRound
+    else next.right -= hOverRound
+  }
+  const vOverRound = next.top + next.bottom - CROP_SUM_LIMIT
+  if (vOverRound > 0) {
+    if (next.top >= next.bottom) next.top -= vOverRound
+    else next.bottom -= vOverRound
+  }
+
+  return next
+}
+
+function applyCropSideValue(crop: Crop, side: CropSide, value: number): Crop {
+  const opposite: Record<CropSide, CropSide> = {
+    top: 'bottom',
+    bottom: 'top',
+    left: 'right',
+    right: 'left',
+  }
+  const maxForSide = CROP_SUM_LIMIT - crop[opposite[side]]
+  const nextValue = Math.min(maxForSide, Math.max(0, value))
+  return finalizeCrop({ ...crop, [side]: nextValue })
+}
+
+function shiftCropWindow(crop: Crop, axis: 'horizontal' | 'vertical', deltaPct: number): Crop {
+  if (axis === 'vertical') {
+    const minDelta = Math.max(-crop.top, crop.bottom - CROP_SUM_LIMIT)
+    const maxDelta = Math.min(CROP_SUM_LIMIT - crop.top, crop.bottom)
+    const delta = Math.min(maxDelta, Math.max(minDelta, deltaPct))
+    return finalizeCrop({
+      ...crop,
+      top: crop.top + delta,
+      bottom: crop.bottom - delta,
+    })
+  }
+
+  const minDelta = Math.max(-crop.left, crop.right - CROP_SUM_LIMIT)
+  const maxDelta = Math.min(CROP_SUM_LIMIT - crop.left, crop.right)
+  const delta = Math.min(maxDelta, Math.max(minDelta, deltaPct))
+  return finalizeCrop({
+    ...crop,
+    left: crop.left + delta,
+    right: crop.right - delta,
+  })
+}
+
+function resizeCropByCorner(item: ImageItem, crop: Crop, corner: CropCorner, ratio: number, px: number, py: number): Crop {
+  const w = Math.max(1, item.width)
+  const h = Math.max(1, item.height)
+
+  const x1 = (crop.left / 100) * w
+  const x2 = w - (crop.right / 100) * w
+  const y1 = (crop.top / 100) * h
+  const y2 = h - (crop.bottom / 100) * h
+
+  const movingLeft = corner === 'top-left' || corner === 'bottom-left'
+  const movingTop = corner === 'top-left' || corner === 'top-right'
+
+  const anchorX = movingLeft ? x2 : x1
+  const anchorY = movingTop ? y2 : y1
+
+  const clampedX = Math.min(w, Math.max(0, px))
+  const clampedY = Math.min(h, Math.max(0, py))
+
+  const rawW = Math.abs(clampedX - anchorX)
+  const rawH = Math.abs(clampedY - anchorY)
+  const desiredW = Math.max(rawW, rawH * ratio)
+
+  const maxWByX = movingLeft ? anchorX : (w - anchorX)
+  const maxWByY = movingTop ? anchorY * ratio : (h - anchorY) * ratio
+  const maxW = Math.max(1, Math.min(maxWByX, maxWByY))
+  const minW = Math.max(1, Math.max(w * 0.02, h * 0.02 * ratio))
+  const finalW = Math.min(maxW, Math.max(minW, desiredW))
+  const finalH = finalW / ratio
+
+  const movingX = anchorX + (movingLeft ? -finalW : finalW)
+  const movingY = anchorY + (movingTop ? -finalH : finalH)
+
+  const nx1 = Math.min(anchorX, movingX)
+  const nx2 = Math.max(anchorX, movingX)
+  const ny1 = Math.min(anchorY, movingY)
+  const ny2 = Math.max(anchorY, movingY)
+
+  return finalizeCrop({
+    top: (ny1 / h) * 100,
+    right: ((w - nx2) / w) * 100,
+    bottom: ((h - ny2) / h) * 100,
+    left: (nx1 / w) * 100,
+  })
+}
+
+function applyCropRatioPreset(item: ImageItem, ratio: number): Crop {
+  const clamp = (v: number) => Math.min(CROP_SUM_LIMIT, Math.max(0, v))
+  const { top, right, bottom, left } = item.crop
+  const w = Math.max(1, item.width)
+  const h = Math.max(1, item.height)
+
+  const currentW = w * (1 - (left + right) / 100)
+  const currentH = h * (1 - (top + bottom) / 100)
+  if (currentW <= 0 || currentH <= 0 || ratio <= 0) return item.crop
+
+  const currentRatio = currentW / currentH
+  if (Math.abs(currentRatio - ratio) < 0.0001) return item.crop
+
+  const next = { top, right, bottom, left }
+  if (currentRatio > ratio) {
+    const targetW = currentH * ratio
+    const removeW = Math.max(0, currentW - targetW)
+    const addSidePct = (removeW / 2 / w) * 100
+    next.left = clamp(left + addSidePct)
+    next.right = clamp(right + addSidePct)
+  } else {
+    const targetH = currentW / ratio
+    const removeH = Math.max(0, currentH - targetH)
+    const addSidePct = (removeH / 2 / h) * 100
+    next.top = clamp(top + addSidePct)
+    next.bottom = clamp(bottom + addSidePct)
+  }
+
+  const horizontal = next.left + next.right
+  if (horizontal > CROP_SUM_LIMIT) {
+    const s = CROP_SUM_LIMIT / horizontal
+    next.left *= s
+    next.right *= s
+  }
+  const vertical = next.top + next.bottom
+  if (vertical > CROP_SUM_LIMIT) {
+    const s = CROP_SUM_LIMIT / vertical
+    next.top *= s
+    next.bottom *= s
+  }
+
+  return finalizeCrop({
+    top: Math.round(next.top),
+    right: Math.round(next.right),
+    bottom: Math.round(next.bottom),
+    left: Math.round(next.left),
+  })
+}
+
+function detectCropPreset(item: ImageItem | null): CropRatioPreset {
+  if (!item) return 'free'
+
+  const { top, right, bottom, left } = item.crop
+  if (top === 0 && right === 0 && bottom === 0 && left === 0) return 'free'
+
+  const { cw, ch } = croppedSize(item)
+  const ratio = cw / ch
+  const matched = CROP_RATIO_PRESETS.find((preset) => (
+    typeof preset.ratio === 'number' && Math.abs(preset.ratio - ratio) < 0.02
+  ))
+
+  return matched?.value ?? 'free'
+}
+
 const imageCache = new Map<string, HTMLImageElement>()
 
 function loadImage(url: string) {
@@ -229,6 +436,10 @@ const i18n = {
     preview: 'Preview',
     previewHint: '(click canvas to select)',
     cropTip: 'Drag blue handles to crop; tap "Done" to finish (or double-click)',
+    cropRatioPreset: 'Crop ratio preset',
+    cropPresetFree: 'Free',
+    centerH: 'Center H',
+    centerV: 'Center V',
     resetCrop: 'Reset crop',
     doneCrop: 'Done',
     emptyHint: 'Upload, drop, or paste images to start',
@@ -263,6 +474,9 @@ const i18n = {
     footerText: 'MergeCanvas — Images processed locally, never uploaded',
     exported: 'Exported',
     defaultText: 'Text',
+    unsupportedFiles: 'Unsupported file(s) skipped',
+    heicConverting: 'Converting HEIC…',
+    heicConvertError: 'Failed to convert HEIC file',
   },
   zh: {
     subtitle: '在线无损拼图工具 —— 本地处理、快速导出',
@@ -286,6 +500,10 @@ const i18n = {
     preview: '预览',
     previewHint: '（点击画布选中图片）',
     cropTip: '拖拽蓝色手柄调整裁切区域，完成后点击"完成裁切"按钮',
+    cropRatioPreset: '裁切比例预设',
+    cropPresetFree: '自由',
+    centerH: '水平居中',
+    centerV: '垂直居中',
     resetCrop: '重置裁切',
     doneCrop: '完成裁切',
     emptyHint: '上传、拖入或粘贴图片开始拼图',
@@ -320,6 +538,9 @@ const i18n = {
     footerText: 'MergeCanvas — 图片在本地处理，不会上传到服务器',
     exported: '已导出',
     defaultText: '文字',
+    unsupportedFiles: '不支持的文件已跳过',
+    heicConverting: 'HEIC 转换中…',
+    heicConvertError: 'HEIC 文件转换失败',
   },
 } as const
 
@@ -338,17 +559,20 @@ function App() {
   const [jpgQuality, setJpgQuality] = useState(0.92)
   const [exportScale, setExportScale] = useState(1)
   const [isExporting, setIsExporting] = useState(false)
+  const [heicProgress, setHeicProgress] = useState<{ done: number; total: number } | null>(null)
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [cropMode, setCropMode] = useState(false)
+  const [cropPreset, setCropPreset] = useState<CropRatioPreset>('free')
   const [maxPreviewWidth, setMaxPreviewWidth] = useState(DEFAULT_PREVIEW_WIDTH)
   const [showDate, setShowDate] = useState(false)
-  const [dateFontSize, setDateFontSize] = useState(24)
+  const [dateFontSize, setDateFontSize] = useState(100)
   const [dateColor, setDateColor] = useState('#ffffff')
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
   const imageRectsRef = useRef<{ id: string; x: number; y: number; w: number; h: number }[]>([])
-  const dragRef = useRef<{ side: keyof Crop; startVal: number; startPos: number } | null>(null)
+  const dragRef = useRef<{ target: CropDragTarget; startX: number; startY: number; startCrop: Crop; mode: 'edge' | 'corner' | 'move' } | null>(null)
   const textDragRef = useRef<{ id: string; startX: number; startY: number; origX: number; origY: number } | null>(null)
   const cropImgRef = useRef<HTMLDivElement | null>(null)
+  const prevSelectedIdRef = useRef<string | null>(null)
   const previewScaleRef = useRef(1)
   const cropScrollRef = useRef(0)
   const lastTapRef = useRef<{ time: number; clientX: number; clientY: number } | null>(null)
@@ -359,6 +583,7 @@ function App() {
   const [toast, setToast] = useState('')
   const [fileDragOver, setFileDragOver] = useState(false)
   const [lang, setLang] = useState<Lang>('en')
+  const currentCropRatio = CROP_RATIO_PRESETS.find((p) => p.value === cropPreset)?.ratio
   const T = i18n[lang]
   const toastTimer = useRef<ReturnType<typeof setTimeout>>(undefined)
 
@@ -435,6 +660,19 @@ function App() {
   })
 
   const selectedImage = images.find((i) => i.id === selectedId) ?? null
+  const currentPreviewImage = selectedImage ?? images[0] ?? null
+  const previewQualityMax = Math.max(400, currentPreviewImage?.width ?? DEFAULT_PREVIEW_WIDTH)
+
+  useEffect(() => {
+    if (prevSelectedIdRef.current === selectedId) return
+    prevSelectedIdRef.current = selectedId
+    const nextSelectedImage = images.find((i) => i.id === selectedId) ?? null
+    setCropPreset(detectCropPreset(nextSelectedImage))
+  }, [selectedId, images])
+
+  useEffect(() => {
+    setMaxPreviewWidth((prev) => Math.min(prev, previewQualityMax))
+  }, [previewQualityMax])
 
   const metrics = calcMetrics(images, direction, gap)
 
@@ -554,14 +792,51 @@ function App() {
         }
       }
     })()
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [images, direction, gap, bgColor, align, texts, selectedId, selectedTextId, cropMode, maxPreviewWidth, showDate, dateFontSize, dateColor])
 
   /* ---- handlers ---- */
 
   const onFileChange = async (fileList: FileList | null) => {
     if (!fileList) return
-    const validFiles = Array.from(fileList).filter((f) => f.type.startsWith('image/'))
+    const allFiles = Array.from(fileList)
+    const isHeic = (f: File) =>
+      f.type === 'image/heic' || f.type === 'image/heif' ||
+      /\.heic$/i.test(f.name) || /\.heif$/i.test(f.name)
+    const supported: File[] = []
+    const heicFiles: File[] = []
+    const unsupported: string[] = []
+    for (const f of allFiles) {
+      if (isHeic(f)) {
+        heicFiles.push(f)
+      } else if (f.type.startsWith('image/')) {
+        supported.push(f)
+      } else {
+        unsupported.push(f.name)
+      }
+    }
+    if (unsupported.length > 0) {
+      showToast(`⚠️ ${T.unsupportedFiles}：${unsupported.join(', ')}`)
+    }
+    // Convert HEIC files to JPEG blobs
+    const convertedFiles: File[] = []
+    if (heicFiles.length > 0) {
+      setHeicProgress({ done: 0, total: heicFiles.length })
+      for (let i = 0; i < heicFiles.length; i++) {
+        const hf = heicFiles[i]
+        try {
+          const result = await heic2any({ blob: hf, toType: 'image/jpeg', quality: 0.92 })
+          const blob = Array.isArray(result) ? result[0] : result
+          const converted = new File([blob], hf.name.replace(/\.heic$/i, '.jpg').replace(/\.heif$/i, '.jpg'), { type: 'image/jpeg' })
+          convertedFiles.push(converted)
+        } catch {
+          showToast(`⚠️ ${T.heicConvertError}：${hf.name}`)
+        }
+        setHeicProgress({ done: i + 1, total: heicFiles.length })
+      }
+      setHeicProgress(null)
+    }
+    const validFiles = [...supported, ...convertedFiles]
+    if (validFiles.length === 0) return
     const loaded = await Promise.all(
       validFiles.map(async (file) => {
         const url = URL.createObjectURL(file)
@@ -633,8 +908,57 @@ function App() {
 
   const setImageCrop = (id: string, side: keyof Crop, v: number) => {
     setImages((prev) => prev.map((i) =>
-      i.id === id ? { ...i, crop: { ...i.crop, [side]: v } } : i
+      i.id === id ? { ...i, crop: applyCropSideValue(i.crop, side, v) } : i
     ))
+  }
+
+  const setImageCropLinked = (id: string, side: CropSide, v: number) => {
+    const nextVal = Math.min(CROP_SUM_LIMIT, Math.max(0, Math.round(v)))
+    if (typeof currentCropRatio !== 'number') {
+      setImageCrop(id, side, nextVal)
+      return
+    }
+
+    setImages((prev) => prev.map((i) => {
+      if (i.id !== id) return i
+      const oldVal = i.crop[side]
+      const moveDelta = (side === 'top' || side === 'left')
+        ? nextVal - oldVal
+        : oldVal - nextVal
+      const axis = side === 'top' || side === 'bottom' ? 'vertical' : 'horizontal'
+      return { ...i, crop: shiftCropWindow(i.crop, axis, moveDelta) }
+    }))
+  }
+
+  const centerCropH = () => {
+    if (!selectedId) return
+    setImages((prev) => prev.map((i) => {
+      if (i.id !== selectedId) return i
+      const total = i.crop.left + i.crop.right
+      const half = total / 2
+      return { ...i, crop: { ...i.crop, left: half, right: half } }
+    }))
+  }
+
+  const centerCropV = () => {
+    if (!selectedId) return
+    setImages((prev) => prev.map((i) => {
+      if (i.id !== selectedId) return i
+      const total = i.crop.top + i.crop.bottom
+      const half = total / 2
+      return { ...i, crop: { ...i.crop, top: half, bottom: half } }
+    }))
+  }
+
+  const resetSelectedCrop = () => {
+    if (!selectedId) return
+    const ratio = currentCropRatio
+    setImages((prev) => prev.map((i) => {
+      if (i.id !== selectedId) return i
+      const baseCrop: Crop = { top: 0, right: 0, bottom: 0, left: 0 }
+      if (typeof ratio !== 'number') return { ...i, crop: baseCrop }
+      return { ...i, crop: applyCropRatioPreset({ ...i, crop: baseCrop }, ratio) }
+    }))
   }
 
   const exportImage = async (format: 'image/png' | 'image/jpeg') => {
@@ -870,7 +1194,7 @@ function App() {
         y = (rect.y + rect.h / 2) / ps
       }
     }
-    const t: TextItem = { id: safeRandomUUID(), text: T.defaultText, fontSize: 60, color: '#ffffff', padding: 20, x, y }
+    const t: TextItem = { id: safeRandomUUID(), text: T.defaultText, fontSize: 100, color: '#ffffff', padding: 20, x, y }
     setTexts((prev) => [...prev, t])
     setSelectedTextId(t.id)
   }
@@ -884,31 +1208,75 @@ function App() {
     setTexts((prev) => prev.map((t) => t.id === id ? { ...t, ...patch } : t))
   }
 
-  const startCropDrag = (side: keyof Crop, e: React.MouseEvent | React.TouchEvent) => {
+  const startCropDrag = (target: CropDragTarget, e: React.MouseEvent | React.TouchEvent, mode: 'edge' | 'corner' | 'move' = 'edge') => {
     e.preventDefault()
     e.stopPropagation()
     if (!selectedImage || !selectedId) return
-    const isVert = side === 'top' || side === 'bottom'
-    const startVal = selectedImage.crop[side]
+    const ratio = CROP_RATIO_PRESETS.find((p) => p.value === cropPreset)?.ratio
+    const isVert = target === 'top' || target === 'bottom'
     const nativeEv = e.nativeEvent
-    const startPos = 'touches' in nativeEv
-      ? (isVert ? nativeEv.touches[0].clientY : nativeEv.touches[0].clientX)
-      : (isVert ? (nativeEv as MouseEvent).clientY : (nativeEv as MouseEvent).clientX)
-    dragRef.current = { side, startVal, startPos }
+    const startX = 'touches' in nativeEv ? nativeEv.touches[0].clientX : (nativeEv as MouseEvent).clientX
+    const startY = 'touches' in nativeEv ? nativeEv.touches[0].clientY : (nativeEv as MouseEvent).clientY
+    dragRef.current = { target, startX, startY, startCrop: selectedImage.crop, mode }
     const capturedId = selectedId
 
     const applyMove = (clientX: number, clientY: number) => {
       const d = dragRef.current
       if (!d || !cropImgRef.current) return
       const rect = cropImgRef.current.getBoundingClientRect()
-      const total = isVert ? rect.height : rect.width
-      const pos = isVert ? clientY : clientX
-      const delta = (pos - d.startPos) / total * 100
-      let newVal = (d.side === 'top' || d.side === 'left')
-        ? d.startVal + delta
-        : d.startVal - delta
-      newVal = Math.min(49, Math.max(0, Math.round(newVal)))
-      setImageCrop(capturedId, d.side, newVal)
+
+      if (d.mode === 'move') {
+        const deltaX = ((clientX - d.startX) / rect.width) * 100
+        const deltaY = ((clientY - d.startY) / rect.height) * 100
+        const shiftedHorizontal = shiftCropWindow(d.startCrop, 'horizontal', deltaX)
+        const nextCrop = shiftCropWindow(shiftedHorizontal, 'vertical', deltaY)
+        setImages((prev) => prev.map((i) => (i.id === capturedId ? { ...i, crop: nextCrop } : i)))
+        return
+      }
+
+      if (d.mode === 'corner') {
+        if (typeof ratio === 'number') {
+          const px = ((clientX - rect.left) / rect.width) * selectedImage.width
+          const py = ((clientY - rect.top) / rect.height) * selectedImage.height
+          const nextCrop = resizeCropByCorner(selectedImage, d.startCrop, d.target as CropCorner, ratio, px, py)
+          setImages((prev) => prev.map((i) => (i.id === capturedId ? { ...i, crop: nextCrop } : i)))
+          return
+        }
+
+        const deltaX = ((clientX - d.startX) / rect.width) * 100
+        const deltaY = ((clientY - d.startY) / rect.height) * 100
+        const corner = d.target as CropCorner
+        let nextCrop = d.startCrop
+        if (corner === 'top-left') {
+          nextCrop = finalizeCrop({ ...d.startCrop, top: d.startCrop.top + deltaY, left: d.startCrop.left + deltaX })
+        } else if (corner === 'top-right') {
+          nextCrop = finalizeCrop({ ...d.startCrop, top: d.startCrop.top + deltaY, right: d.startCrop.right - deltaX })
+        } else if (corner === 'bottom-left') {
+          nextCrop = finalizeCrop({ ...d.startCrop, bottom: d.startCrop.bottom - deltaY, left: d.startCrop.left + deltaX })
+        } else {
+          nextCrop = finalizeCrop({ ...d.startCrop, bottom: d.startCrop.bottom - deltaY, right: d.startCrop.right - deltaX })
+        }
+        setImages((prev) => prev.map((i) => (i.id === capturedId ? { ...i, crop: nextCrop } : i)))
+        return
+      }
+
+      const delta = isVert
+        ? ((clientY - d.startY) / rect.height) * 100
+        : ((clientX - d.startX) / rect.width) * 100
+
+      if (typeof ratio === 'number') {
+        const axis = isVert ? 'vertical' : 'horizontal'
+        const nextCrop = shiftCropWindow(d.startCrop, axis, delta)
+        setImages((prev) => prev.map((i) => (i.id === capturedId ? { ...i, crop: nextCrop } : i)))
+        return
+      }
+
+      const side = d.target as CropSide
+      let newVal = (side === 'top' || side === 'left')
+        ? d.startCrop[side] + delta
+        : d.startCrop[side] - delta
+      newVal = Math.min(CROP_SUM_LIMIT, Math.max(0, Math.round(newVal)))
+      setImageCrop(capturedId, side, newVal)
     }
 
     const onMouseMove = (ev: MouseEvent) => applyMove(ev.clientX, ev.clientY)
@@ -925,6 +1293,15 @@ function App() {
     document.addEventListener('mouseup', onEnd)
     document.addEventListener('touchmove', onTouchMove, { passive: false })
     document.addEventListener('touchend', onEnd)
+  }
+
+  const applyCropPreset = (preset: CropRatioPreset) => {
+    setCropPreset(preset)
+    const ratio = CROP_RATIO_PRESETS.find((p) => p.value === preset)?.ratio
+    if (!selectedId || typeof ratio !== 'number') return
+    setImages((prev) => prev.map((i) => (
+      i.id === selectedId ? { ...i, crop: applyCropRatioPreset(i, ratio) } : i
+    )))
   }
 
   /* ---- JSX ---- */
@@ -946,7 +1323,7 @@ function App() {
           <div className="list-toolbar">
             <label className="upload">
               {T.upload}
-              <input type="file" accept="image/*" multiple onChange={(e) => { void onFileChange(e.target.files); e.target.value = '' }} />
+              <input type="file" accept="image/*,.heic,.heif" multiple onChange={(e) => { void onFileChange(e.target.files); e.target.value = '' }} />
             </label>
             {images.length > 1 && (
               <>
@@ -1028,10 +1405,10 @@ function App() {
                             <DragInput
                               type="number"
                               min={0}
-                              max={49}
+                              max={CROP_SUM_LIMIT}
                               value={item.crop[side]}
                               onClick={(e) => e.stopPropagation()}
-                              onValueChange={(v) => setImageCrop(item.id, side, Math.min(49, Math.max(0, v)))}
+                              onValueChange={(v) => setImageCropLinked(item.id, side, v)}
                             />
                           </label>
                         ))}
@@ -1050,6 +1427,22 @@ function App() {
           {cropMode && selectedImage ? (
             <div className="crop-editor">
               <p className="crop-tip">{T.cropTip}</p>
+              <div className="crop-preset-row">
+                <label htmlFor="crop-preset-select">{T.cropRatioPreset}</label>
+                <div className="select-wrap">
+                  <select
+                    id="crop-preset-select"
+                    value={cropPreset}
+                    onChange={(e) => applyCropPreset(e.target.value as CropRatioPreset)}
+                  >
+                    {CROP_RATIO_PRESETS.map((preset) => (
+                      <option key={preset.value} value={preset.value}>
+                        {preset.value === 'free' ? T.cropPresetFree : preset.value}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              </div>
               <div className="crop-img-wrap" ref={cropImgRef} onDoubleClick={() => { setCropMode(false); requestAnimationFrame(() => { window.scrollTo({ top: cropScrollRef.current }) }) }}>
                 <img src={selectedImage.url} draggable={false} alt="" />
                 {/* 遮罩 */}
@@ -1057,14 +1450,31 @@ function App() {
                 <div className="crop-mask" style={{ bottom: 0, left: 0, right: 0, height: `${selectedImage.crop.bottom}%` }} />
                 <div className="crop-mask" style={{ top: `${selectedImage.crop.top}%`, left: 0, bottom: `${selectedImage.crop.bottom}%`, width: `${selectedImage.crop.left}%` }} />
                 <div className="crop-mask" style={{ top: `${selectedImage.crop.top}%`, right: 0, bottom: `${selectedImage.crop.bottom}%`, width: `${selectedImage.crop.right}%` }} />
+                <div
+                  className="crop-selection"
+                  style={{
+                    top: `${selectedImage.crop.top}%`,
+                    right: `${selectedImage.crop.right}%`,
+                    bottom: `${selectedImage.crop.bottom}%`,
+                    left: `${selectedImage.crop.left}%`,
+                  }}
+                  onMouseDown={(e) => startCropDrag('move', e, 'move')}
+                  onTouchStart={(e) => startCropDrag('move', e, 'move')}
+                />
                 {/* 拖拽手柄 */}
-                <div className="crop-handle crop-h" style={{ top: `${selectedImage.crop.top}%` }} onMouseDown={(e) => startCropDrag('top', e)} onTouchStart={(e) => startCropDrag('top', e)} />
-                <div className="crop-handle crop-h" style={{ bottom: `${selectedImage.crop.bottom}%`, transform: 'translateY(50%)' }} onMouseDown={(e) => startCropDrag('bottom', e)} onTouchStart={(e) => startCropDrag('bottom', e)} />
-                <div className="crop-handle crop-v" style={{ left: `${selectedImage.crop.left}%` }} onMouseDown={(e) => startCropDrag('left', e)} onTouchStart={(e) => startCropDrag('left', e)} />
-                <div className="crop-handle crop-v" style={{ right: `${selectedImage.crop.right}%`, transform: 'translateX(50%)' }} onMouseDown={(e) => startCropDrag('right', e)} onTouchStart={(e) => startCropDrag('right', e)} />
+                <div className="crop-handle crop-h crop-h-start" style={{ top: `${selectedImage.crop.top}%`, left: `${selectedImage.crop.left}%`, right: `${selectedImage.crop.right}%` }} onMouseDown={(e) => startCropDrag('top', e)} onTouchStart={(e) => startCropDrag('top', e)} />
+                <div className="crop-handle crop-h crop-h-end" style={{ bottom: `${selectedImage.crop.bottom}%`, left: `${selectedImage.crop.left}%`, right: `${selectedImage.crop.right}%` }} onMouseDown={(e) => startCropDrag('bottom', e)} onTouchStart={(e) => startCropDrag('bottom', e)} />
+                <div className="crop-handle crop-v crop-v-start" style={{ left: `${selectedImage.crop.left}%`, top: `${selectedImage.crop.top}%`, bottom: `${selectedImage.crop.bottom}%` }} onMouseDown={(e) => startCropDrag('left', e)} onTouchStart={(e) => startCropDrag('left', e)} />
+                <div className="crop-handle crop-v crop-v-end" style={{ right: `${selectedImage.crop.right}%`, top: `${selectedImage.crop.top}%`, bottom: `${selectedImage.crop.bottom}%` }} onMouseDown={(e) => startCropDrag('right', e)} onTouchStart={(e) => startCropDrag('right', e)} />
+                <div className="crop-handle crop-corner crop-corner-tl" style={{ top: `${selectedImage.crop.top}%`, left: `${selectedImage.crop.left}%` }} onMouseDown={(e) => startCropDrag('top-left', e, 'corner')} onTouchStart={(e) => startCropDrag('top-left', e, 'corner')} />
+                <div className="crop-handle crop-corner crop-corner-tr" style={{ top: `${selectedImage.crop.top}%`, right: `${selectedImage.crop.right}%` }} onMouseDown={(e) => startCropDrag('top-right', e, 'corner')} onTouchStart={(e) => startCropDrag('top-right', e, 'corner')} />
+                <div className="crop-handle crop-corner crop-corner-bl" style={{ bottom: `${selectedImage.crop.bottom}%`, left: `${selectedImage.crop.left}%` }} onMouseDown={(e) => startCropDrag('bottom-left', e, 'corner')} onTouchStart={(e) => startCropDrag('bottom-left', e, 'corner')} />
+                <div className="crop-handle crop-corner crop-corner-br" style={{ bottom: `${selectedImage.crop.bottom}%`, right: `${selectedImage.crop.right}%` }} onMouseDown={(e) => startCropDrag('bottom-right', e, 'corner')} onTouchStart={(e) => startCropDrag('bottom-right', e, 'corner')} />
               </div>
               <div className="crop-actions">
-                <button onClick={() => { if (selectedId) setImages((prev) => prev.map((i) => i.id === selectedId ? { ...i, crop: { top: 0, right: 0, bottom: 0, left: 0 } } : i)); }}>{T.resetCrop}</button>
+                <button onClick={centerCropH}>{T.centerH}</button>
+                <button onClick={centerCropV}>{T.centerV}</button>
+                <button onClick={resetSelectedCrop}>{T.resetCrop}</button>
                 <button className="active" onClick={() => { setCropMode(false); requestAnimationFrame(() => { window.scrollTo({ top: cropScrollRef.current }) }) }}>{T.doneCrop}</button>
               </div>
             </div>
@@ -1074,35 +1484,49 @@ function App() {
               <p>{T.emptyHint}</p>
               <label className="upload upload-secondary">
                 {T.chooseImages}
-                <input type="file" accept="image/*" multiple onChange={(e) => { void onFileChange(e.target.files); e.target.value = '' }} />
+                <input type="file" accept="image/*,.heic,.heif" multiple onChange={(e) => { void onFileChange(e.target.files); e.target.value = '' }} />
               </label>
             </div>
           ) : (
-            <div className={`canvas-wrap${fileDragOver ? ' drag-highlight' : ''}`}>
-              <canvas ref={canvasRef} onMouseDown={onCanvasMouseDown} onDoubleClick={onCanvasDoubleClick} onTouchStart={onCanvasTouchStart} onTouchEnd={onCanvasTouchEnd} style={{ cursor: 'crosshair', maxWidth: '100%', height: 'auto', willChange: 'transform' }} />
-            </div>
+            <>
+              <div className="preview-meta-row">
+                <span className="tip">{T.canvasSize}：{metrics.width} × {metrics.height}</span>
+                <div className="preview-quality-inline">
+                  <label>{T.previewQuality}：{maxPreviewWidth}px</label>
+                  <DragInput type="range" min={400} max={previewQualityMax} step={100} value={maxPreviewWidth} resetValue={Math.min(DEFAULT_PREVIEW_WIDTH, previewQualityMax)} onValueChange={setMaxPreviewWidth} />
+                </div>
+              </div>
+              <div className={`canvas-wrap${fileDragOver ? ' drag-highlight' : ''}`}>
+                <canvas ref={canvasRef} onMouseDown={onCanvasMouseDown} onDoubleClick={onCanvasDoubleClick} onTouchStart={onCanvasTouchStart} onTouchEnd={onCanvasTouchEnd} style={{ cursor: 'crosshair', maxWidth: '100%', height: 'auto' }} />
+              </div>
+            </>
           )}
-          {images.length > 0 && <p className="tip">{T.canvasSize}：{metrics.width} × {metrics.height}</p>}
         </section>
 
         {/* 右：设置 */}
         <aside className="panel">
           <h2>{T.settings}</h2>
 
-          <div className="field">
-            <label>{T.direction}</label>
-            <select value={direction} onChange={(e) => setDirection(e.target.value as Direction)}>
-              <option value="vertical">{T.vertical}</option>
-              <option value="horizontal">{T.horizontal}</option>
-            </select>
-          </div>
-          <div className="field">
-            <label>{T.alignment}</label>
-            <select value={align} onChange={(e) => setAlign(e.target.value as Align)}>
-              <option value="start">{T.alignStart}</option>
-              <option value="center">{T.alignCenter}</option>
-              <option value="end">{T.alignEnd}</option>
-            </select>
+          <div className="field two field-compact-row">
+            <div className="field field-compact">
+              <label>{T.direction}</label>
+              <div className="select-wrap">
+                <select value={direction} onChange={(e) => setDirection(e.target.value as Direction)}>
+                  <option value="vertical">{T.vertical}</option>
+                  <option value="horizontal">{T.horizontal}</option>
+                </select>
+              </div>
+            </div>
+            <div className="field field-compact">
+              <label>{T.alignment}</label>
+              <div className="select-wrap">
+                <select value={align} onChange={(e) => setAlign(e.target.value as Align)}>
+                  <option value="start">{T.alignStart}</option>
+                  <option value="center">{T.alignCenter}</option>
+                  <option value="end">{T.alignEnd}</option>
+                </select>
+              </div>
+            </div>
           </div>
           <div className="field">
             <label>{T.gap}：{gap}px</label>
@@ -1189,18 +1613,15 @@ function App() {
             ))}
           </ul>
 
-          <div className="field">
-            <label>{T.previewQuality}：{maxPreviewWidth}px</label>
-            <DragInput type="range" min={400} max={3000} step={100} value={maxPreviewWidth} resetValue={DEFAULT_PREVIEW_WIDTH} onValueChange={setMaxPreviewWidth} />
-          </div>
-
           <h3>{T.exportTitle}</h3>
           <div className="field">
             <label>{T.exportScale}</label>
-            <select value={exportScale} onChange={(e) => setExportScale(Number(e.target.value))}>
-              <option value={1}>1x</option>
-              <option value={2}>2x</option>
-            </select>
+            <div className="select-wrap">
+              <select value={exportScale} onChange={(e) => setExportScale(Number(e.target.value))}>
+                <option value={1}>1x</option>
+                <option value={2}>2x</option>
+              </select>
+            </div>
           </div>
           <div className="field">
             <label>{T.jpegQuality}：{jpgQuality.toFixed(2)}</label>
@@ -1223,6 +1644,14 @@ function App() {
       </footer>
 
       {toast && <div className="toast">{toast}</div>}
+      {heicProgress && (
+        <div className="heic-progress">
+          <span className="heic-progress-label">{T.heicConverting} {heicProgress.done}/{heicProgress.total}</span>
+          <div className="heic-progress-bar-track">
+            <div className="heic-progress-bar-fill" style={{ width: `${Math.round(heicProgress.done / heicProgress.total * 100)}%` }} />
+          </div>
+        </div>
+      )}
     </main>
   )
 }
