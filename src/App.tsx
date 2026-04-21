@@ -156,6 +156,15 @@ type CropRatioPreset = (typeof CROP_RATIO_PRESETS)[number]['value']
 
 const DEFAULT_PREVIEW_WIDTH = 600
 const CROP_SUM_LIMIT = 99
+const MAX_EXPORT_SIDE = 65535
+
+type ExportPlan = {
+  exportWidth: number
+  exportHeight: number
+  splitAxis: 'vertical' | 'horizontal' | null
+  segments: { offset: number; size: number }[]
+  failureReason: null | 'both-exceed' | 'single-image-too-large' | 'no-boundary'
+}
 
 function formatFileSize(bytes: number) {
   if (bytes < 1024) return bytes + ' B'
@@ -211,6 +220,109 @@ function calcMetrics(
   const width = Math.max(...sizes.map((sz) => sz.baseW))
   const height = sizes.reduce((s, sz) => s + sz.baseH, 0) + gap * (images.length - 1)
   return { width, height }
+}
+
+function buildExportPlan(
+  images: ImageItem[],
+  direction: Direction,
+  gap: number,
+  exportScale: number,
+): ExportPlan {
+  const metrics = calcMetrics(images, direction, gap)
+  const uniformTarget = getUniformTarget(images, direction)
+  const exportWidth = Math.max(1, Math.round(metrics.width * exportScale))
+  const exportHeight = Math.max(1, Math.round(metrics.height * exportScale))
+
+  if (exportWidth > MAX_EXPORT_SIDE && exportHeight > MAX_EXPORT_SIDE) {
+    return {
+      exportWidth,
+      exportHeight,
+      splitAxis: null,
+      segments: [],
+      failureReason: 'both-exceed',
+    }
+  }
+
+  const splitAxis: 'vertical' | 'horizontal' | null = exportHeight > MAX_EXPORT_SIDE
+    ? 'vertical'
+    : exportWidth > MAX_EXPORT_SIDE
+      ? 'horizontal'
+      : null
+
+  if (!splitAxis) {
+    return {
+      exportWidth,
+      exportHeight,
+      splitAxis,
+      segments: [{ offset: 0, size: splitAxis === 'vertical' ? exportHeight : exportWidth }],
+      failureReason: null,
+    }
+  }
+
+  if (splitAxis !== direction) {
+    return {
+      exportWidth,
+      exportHeight,
+      splitAxis,
+      segments: [],
+      failureReason: 'single-image-too-large',
+    }
+  }
+
+  const oversizedImage = images.some((image) => {
+    const size = calcDisplaySize(image, direction, uniformTarget)
+    const mainSide = (direction === 'vertical' ? size.h : size.w) * exportScale
+    return mainSide > MAX_EXPORT_SIDE
+  })
+  if (oversizedImage) {
+    return {
+      exportWidth,
+      exportHeight,
+      splitAxis,
+      segments: [],
+      failureReason: 'single-image-too-large',
+    }
+  }
+
+  const mainLength = splitAxis === 'vertical' ? exportHeight : exportWidth
+  const imageSplitPoints: number[] = []
+  let cursor = 0
+  for (let i = 0; i < images.length; i++) {
+    if (i > 0) imageSplitPoints.push(Math.round(cursor))
+    const size = calcDisplaySize(images[i], direction, uniformTarget)
+    const main = (direction === 'vertical' ? size.h : size.w) * exportScale
+    cursor += main + (i < images.length - 1 ? gap * exportScale : 0)
+  }
+
+  const segments: { offset: number; size: number }[] = []
+  let offset = 0
+  while (offset < mainLength) {
+    const maxEnd = Math.min(mainLength, offset + MAX_EXPORT_SIDE)
+    if (maxEnd === mainLength) {
+      segments.push({ offset, size: maxEnd - offset })
+      break
+    }
+    const boundary = imageSplitPoints.filter((point) => point > offset && point <= maxEnd).pop()
+    if (!boundary) {
+      return {
+        exportWidth,
+        exportHeight,
+        splitAxis,
+        segments: [],
+        failureReason: 'no-boundary',
+      }
+    }
+    segments.push({ offset, size: boundary - offset })
+    offset = boundary
+  }
+
+  return {
+    exportWidth,
+    exportHeight,
+    splitAxis,
+    segments,
+    failureReason: null,
+  }
 }
 
 function finalizeCrop(crop: Crop): Crop {
@@ -409,6 +521,12 @@ function loadImage(url: string) {
   })
 }
 
+function waitForNextPaint() {
+  return new Promise<void>((resolve) => {
+    requestAnimationFrame(() => resolve())
+  })
+}
+
 /* ---- i18n ---- */
 
 const i18n = {
@@ -422,6 +540,7 @@ const i18n = {
     reverse: '🔄 Reverse',
     clearAll: 'Clear all',
     clear: '🗑 Clear',
+    cancel: 'Cancel',
     confirmClear: 'Clear all images?',
     confirmClearMsg: 'This action cannot be undone.',
     moveUp: 'Move up',
@@ -468,6 +587,17 @@ const i18n = {
     exportScale: 'Export scale',
     jpegQuality: 'JPEG quality',
     exporting: 'Exporting...',
+    exportDrawing: 'Drawing',
+    exportEncoding: 'Encoding',
+    exportSegment: 'Part',
+    exportSegmentUnit: 'parts',
+    exportSplitEstimate: 'Will export in parts',
+    exportSplitting: 'Export will be split into parts',
+    exportSplitDone: 'Exported in parts',
+    exportSizeTooLarge: 'Export size exceeds browser canvas limits',
+    exportSingleImageTooLarge: 'A single image exceeds export limit and cannot be split safely',
+    formatPNG: 'PNG',
+    formatJPEG: 'JPEG',
     exportPNG: 'Export PNG',
     exportJPEG: 'Export JPEG',
     estSize: 'Est. size',
@@ -475,6 +605,8 @@ const i18n = {
     exported: 'Exported',
     exportFailed: 'Export failed, please try again',
     defaultText: 'Text',
+    thumbAlt: 'Image thumbnail',
+    cropPreviewAlt: 'Crop preview',
     unsupportedFiles: 'Unsupported file(s) skipped',
     heicConverting: 'Converting HEIC…',
     heicConvertError: 'Failed to convert HEIC file',
@@ -489,6 +621,7 @@ const i18n = {
     reverse: '🔄 反转',
     clearAll: '清空全部',
     clear: '🗑 清空',
+    cancel: '取消',
     confirmClear: '清空全部图片？',
     confirmClearMsg: '此操作无法撤销。',
     moveUp: '上移',
@@ -535,12 +668,25 @@ const i18n = {
     exportScale: '导出倍率',
     jpegQuality: 'JPEG 质量',
     exporting: '导出中…',
+    exportDrawing: '绘制中',
+    exportEncoding: '编码中',
+    exportSegment: '分段',
+    exportSegmentUnit: '段',
+    exportSplitEstimate: '预计将分段导出',
+    exportSplitting: '本次导出将分段进行',
+    exportSplitDone: '已分段导出',
+    exportSizeTooLarge: '导出尺寸超过浏览器画布限制',
+    exportSingleImageTooLarge: '存在单张图片超过导出上限，无法按图片边界安全分段',
+    formatPNG: 'PNG',
+    formatJPEG: 'JPEG',
     exportPNG: '导出 PNG',
     exportJPEG: '导出 JPEG',
     estSize: '预估尺寸',
     footerText: 'MergeCanvas — 图片在本地处理，不会上传到服务器',
     exported: '已导出',
     defaultText: '文字',
+    thumbAlt: '图片缩略图',
+    cropPreviewAlt: '裁切预览图',
     exportFailed: '导出失败，请重试',
     unsupportedFiles: '不支持的文件已跳过',
     heicConverting: 'HEIC 转换中…',
@@ -563,6 +709,14 @@ function App() {
   const [jpgQuality, setJpgQuality] = useState(0.92)
   const [exportScale, setExportScale] = useState(1)
   const [isExporting, setIsExporting] = useState(false)
+  const [exportProgress, setExportProgress] = useState<{
+    phase: 'drawing' | 'encoding'
+    done: number
+    total: number
+    currentName: string
+    partIndex: number
+    partTotal: number
+  } | null>(null)
   const [heicProgress, setHeicProgress] = useState<{ done: number; total: number } | null>(null)
   const [showClearConfirm, setShowClearConfirm] = useState(false)
   const [selectedId, setSelectedId] = useState<string | null>(null)
@@ -692,6 +846,10 @@ function App() {
   }, [previewQualityMax])
 
   const metrics = useMemo(() => calcMetrics(images, direction, gap), [images, direction, gap])
+  const exportPlan = useMemo(
+    () => buildExportPlan(images, direction, gap, exportScale),
+    [images, direction, gap, exportScale],
+  )
 
   /* ---- preview effect: 依赖项变化时重绘预览画布 ---- */
 
@@ -812,7 +970,7 @@ function App() {
       }
       textRectsRef.current = newTextRects
     })()
-  }, [metrics, images, direction, gap, bgColor, align, texts, selectedId, selectedTextId, cropMode, maxPreviewWidth, showDate, dateFontSize, dateColor])
+  }, [metrics, images, direction, gap, bgColor, align, texts, selectedId, selectedTextId, maxPreviewWidth, showDate, dateFontSize, dateColor])
 
   /* ---- handlers ---- */
 
@@ -997,79 +1155,156 @@ function App() {
     if (!images.length) return
     setIsExporting(true)
     try {
-      const offscreen = document.createElement('canvas')
       const m = calcMetrics(images, direction, gap)
       const ut = getUniformTarget(images, direction)
       const s = exportScale
-      offscreen.width = Math.max(1, Math.round(m.width * s))
-      offscreen.height = Math.max(1, Math.round(m.height * s))
-      const ctx = offscreen.getContext('2d')
-      if (!ctx) return
+      const { exportWidth, exportHeight, splitAxis, segments, failureReason } = exportPlan
+      const quality = format === 'image/jpeg' ? jpgQuality : undefined
+      const ext = format === 'image/png' ? 'png' : 'jpg'
+      const stamp = Date.now()
 
-      ctx.fillStyle = bgColor
-      ctx.fillRect(0, 0, offscreen.width, offscreen.height)
-
-      let cx = 0, cy = 0
-      for (const item of images) {
-        const img = await loadImage(item.url)
-        const sz = calcDisplaySize(item, direction, ut)
-        const dw = sz.w * s, dh = sz.h * s
-        let dx = cx, dy = cy
-        if (direction === 'horizontal') {
-          const remain = m.height - sz.h
-          if (align === 'center') dy += (remain / 2) * s
-          if (align === 'end') dy += remain * s
-        } else {
-          const remain = m.width - sz.w
-          if (align === 'center') dx += (remain / 2) * s
-          if (align === 'end') dx += remain * s
-        }
-        const srcX = img.naturalWidth * item.crop.left / 100
-        const srcY = img.naturalHeight * item.crop.top / 100
-        const srcW = img.naturalWidth * (1 - (item.crop.left + item.crop.right) / 100)
-        const srcH = img.naturalHeight * (1 - (item.crop.top + item.crop.bottom) / 100)
-        ctx.drawImage(img, srcX, srcY, srcW, srcH, dx, dy, dw, dh)
-
-        if (showDate && item.dateStr) {
-          const dfsPx = Math.round(dateFontSize * s)
-          ctx.font = `${dfsPx}px "Arial","PingFang SC",sans-serif`
-          ctx.textBaseline = 'bottom'
-          const dm = ctx.measureText(item.dateStr)
-          const pad = 6 * s
-          ctx.fillStyle = 'rgba(0,0,0,0.45)'
-          ctx.fillRect(dx + dw - dm.width - pad * 2, dy + dh - dfsPx - pad * 2, dm.width + pad * 2, dfsPx + pad * 2)
-          ctx.fillStyle = dateColor
-          ctx.fillText(item.dateStr, dx + dw - dm.width - pad, dy + dh - pad)
-        }
-
-        if (direction === 'horizontal') cx += dw + gap * s
-        else cy += dh + gap * s
+      if (failureReason === 'both-exceed') {
+        showToast(`⚠️ ${T.exportSizeTooLarge}：${exportWidth} × ${exportHeight}px`)
+        return
       }
-      for (const t of texts) {
-        if (t.text.trim()) {
-          const fsPx = Math.round(t.fontSize * s)
-          ctx.font = `${fsPx}px "Arial","PingFang SC",sans-serif`
-          ctx.textBaseline = 'top'
-          ctx.fillStyle = t.color
-          const lines = t.text.split('\n')
-          const lineH = fsPx * 1.2
-          for (let li = 0; li < lines.length; li++) {
-            ctx.fillText(lines[li], t.x * s, t.y * s + li * lineH)
+      if (failureReason === 'single-image-too-large') {
+        showToast(`⚠️ ${T.exportSingleImageTooLarge}：${exportWidth} × ${exportHeight}px`)
+        return
+      }
+      if (failureReason === 'no-boundary') {
+        showToast(`⚠️ ${T.exportSizeTooLarge}：${exportWidth} × ${exportHeight}px`)
+        return
+      }
+
+      const segmentCount = segments.length
+      if (segmentCount > 1) {
+        showToast(`ℹ️ ${T.exportSplitting}（${segmentCount} ${T.exportSegmentUnit}）`)
+      }
+
+      const drawSegment = async (
+        ctx: CanvasRenderingContext2D,
+        offsetX: number,
+        offsetY: number,
+        segmentIndex: number,
+      ) => {
+        ctx.fillStyle = bgColor
+        ctx.fillRect(0, 0, ctx.canvas.width, ctx.canvas.height)
+
+        let cx = 0
+        let cy = 0
+        for (let i = 0; i < images.length; i++) {
+          const item = images[i]
+          const img = await loadImage(item.url)
+          const sz = calcDisplaySize(item, direction, ut)
+          const dw = sz.w * s
+          const dh = sz.h * s
+          let dx = cx
+          let dy = cy
+          if (direction === 'horizontal') {
+            const remain = m.height - sz.h
+            if (align === 'center') dy += (remain / 2) * s
+            if (align === 'end') dy += remain * s
+          } else {
+            const remain = m.width - sz.w
+            if (align === 'center') dx += (remain / 2) * s
+            if (align === 'end') dx += remain * s
+          }
+
+          const srcX = img.naturalWidth * item.crop.left / 100
+          const srcY = img.naturalHeight * item.crop.top / 100
+          const srcW = img.naturalWidth * (1 - (item.crop.left + item.crop.right) / 100)
+          const srcH = img.naturalHeight * (1 - (item.crop.top + item.crop.bottom) / 100)
+          ctx.drawImage(img, srcX, srcY, srcW, srcH, dx - offsetX, dy - offsetY, dw, dh)
+
+          if (showDate && item.dateStr) {
+            const dfsPx = Math.round(dateFontSize * s)
+            ctx.font = `${dfsPx}px "Arial","PingFang SC",sans-serif`
+            ctx.textBaseline = 'bottom'
+            const dm = ctx.measureText(item.dateStr)
+            const pad = 6 * s
+            ctx.fillStyle = 'rgba(0,0,0,0.45)'
+            ctx.fillRect(dx - offsetX + dw - dm.width - pad * 2, dy - offsetY + dh - dfsPx - pad * 2, dm.width + pad * 2, dfsPx + pad * 2)
+            ctx.fillStyle = dateColor
+            ctx.fillText(item.dateStr, dx - offsetX + dw - dm.width - pad, dy - offsetY + dh - pad)
+          }
+
+          if (direction === 'horizontal') cx += dw + gap * s
+          else cy += dh + gap * s
+
+          const done = segmentIndex * images.length + i + 1
+          setExportProgress({
+            phase: 'drawing',
+            done,
+            total: images.length * segmentCount,
+            currentName: item.file.name,
+            partIndex: segmentIndex + 1,
+            partTotal: segmentCount,
+          })
+          await waitForNextPaint()
+        }
+
+        for (const t of texts) {
+          if (t.text.trim()) {
+            const fsPx = Math.round(t.fontSize * s)
+            ctx.font = `${fsPx}px "Arial","PingFang SC",sans-serif`
+            ctx.textBaseline = 'top'
+            ctx.fillStyle = t.color
+            const lines = t.text.split('\n')
+            const lineH = fsPx * 1.2
+            for (let li = 0; li < lines.length; li++) {
+              ctx.fillText(lines[li], t.x * s - offsetX, t.y * s + li * lineH - offsetY)
+            }
           }
         }
       }
 
-      const quality = format === 'image/jpeg' ? jpgQuality : undefined
-      const blob = await new Promise<Blob | null>((resolve) => offscreen.toBlob(resolve, format, quality))
-      if (!blob) { showToast(`⚠️ ${T.exportFailed}`); return }
-      const url = URL.createObjectURL(blob)
-      const a = document.createElement('a')
-      a.href = url
-      a.download = `MergeCanvas_${Date.now()}.${format === 'image/png' ? 'png' : 'jpg'}`
-      a.click()
-      setTimeout(() => URL.revokeObjectURL(url), 1000)
-      showToast(`✅ ${T.exported} ${format === 'image/png' ? 'PNG' : 'JPEG'}（${formatFileSize(blob.size)}）`)
+      const downloadBlob = (blob: Blob, partIndex: number, totalParts: number) => {
+        const url = URL.createObjectURL(blob)
+        const a = document.createElement('a')
+        const suffix = totalParts > 1 ? `_part${partIndex + 1}` : ''
+        a.href = url
+        a.download = `MergeCanvas_${stamp}${suffix}.${ext}`
+        a.click()
+        setTimeout(() => URL.revokeObjectURL(url), 1000)
+      }
+
+      let lastBlobSize = 0
+      for (let part = 0; part < segmentCount; part++) {
+        const offscreen = document.createElement('canvas')
+        const seg = segments[part]
+        const segmentOffsetY = splitAxis === 'vertical' ? seg.offset : 0
+        const segmentOffsetX = splitAxis === 'horizontal' ? seg.offset : 0
+        offscreen.width = splitAxis === 'horizontal' ? seg.size : exportWidth
+        offscreen.height = splitAxis === 'vertical' ? seg.size : exportHeight
+        const ctx = offscreen.getContext('2d')
+        if (!ctx) return
+
+        await drawSegment(ctx, segmentOffsetX, segmentOffsetY, part)
+        setExportProgress({
+          phase: 'encoding',
+          done: part + 1,
+          total: segmentCount,
+          currentName: '',
+          partIndex: part + 1,
+          partTotal: segmentCount,
+        })
+        await waitForNextPaint()
+        const blob = await new Promise<Blob | null>((resolve) => offscreen.toBlob(resolve, format, quality))
+        if (!blob) {
+          showToast(`⚠️ ${T.exportFailed}`)
+          return
+        }
+        lastBlobSize = blob.size
+        downloadBlob(blob, part, segmentCount)
+      }
+
+      if (segmentCount > 1) {
+        showToast(`✅ ${T.exportSplitDone}（${segmentCount} ${T.exportSegmentUnit}）`)
+      } else {
+        showToast(`✅ ${T.exported} ${format === 'image/png' ? T.formatPNG : T.formatJPEG}（${formatFileSize(lastBlobSize)}）`)
+      }
     } finally {
+      setExportProgress(null)
       setIsExporting(false)
     }
   }
@@ -1326,7 +1561,10 @@ function App() {
     <main className="app">
       <header className="top">
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-          <h1>MergeCanvas</h1>
+          <div className="brand">
+            <img className="web-logo" src="/Logo.png" alt="MergeCanvas" />
+            <h1 className="brand-text">MergeCanvas</h1>
+          </div>
           <button className="lang-toggle" onClick={() => setLang(lang === 'en' ? 'zh' : 'en')}>{lang === 'en' ? '中文' : 'EN'}</button>
         </div>
         <p>{T.subtitle}</p>
@@ -1388,7 +1626,7 @@ function App() {
                 onClick={() => { setSelectedId(item.id); requestAnimationFrame(() => { const r = imageRectsRef.current.find((rc) => rc.id === item.id); const canvas = canvasRef.current; if (r && canvas) { const canvasRect = canvas.getBoundingClientRect(); const ratio = canvas.clientWidth / canvas.width; const imgTop = canvasRect.top + window.scrollY + r.y * ratio; window.scrollTo({ top: imgTop - window.innerHeight / 3, behavior: 'smooth' }) } }) }}
               >
                 <div className="item-head">
-                  <img className="thumb" src={item.url} alt="" draggable={false} />
+                  <img className="thumb" src={item.url} alt={`${T.thumbAlt}：${item.file.name}`} draggable={false} />
                   <div>
                     <strong title={item.file.name}>{item.file.name}</strong>
                     <span>{item.width} × {item.height} · {formatFileSize(item.fileSize)}</span>
@@ -1460,7 +1698,7 @@ function App() {
                 </div>
               </div>
               <div className="crop-img-wrap" ref={cropImgRef} onDoubleClick={() => { setCropMode(false); requestAnimationFrame(() => { window.scrollTo({ top: cropScrollRef.current }) }) }}>
-                <img src={selectedImage.url} draggable={false} alt="" />
+                <img src={selectedImage.url} draggable={false} alt={`${T.cropPreviewAlt}：${selectedImage.file.name}`} />
                 {/* 遮罩 */}
                 <div className="crop-mask" style={{ top: 0, left: 0, right: 0, height: `${selectedImage.crop.top}%` }} />
                 <div className="crop-mask" style={{ bottom: 0, left: 0, right: 0, height: `${selectedImage.crop.bottom}%` }} />
@@ -1648,7 +1886,18 @@ function App() {
             <button disabled={!images.length || isExporting} onClick={() => void exportImage('image/jpeg')}>{isExporting ? T.exporting : T.exportJPEG}</button>
           </div>
           {images.length > 0 && (
-            <p className="tip">{T.estSize}：{metrics.width * exportScale} × {metrics.height * exportScale}px</p>
+            <>
+              <p className="tip">{T.estSize}：{exportPlan.exportWidth} × {exportPlan.exportHeight}px</p>
+              {exportPlan.failureReason === 'single-image-too-large' && (
+                <p className="tip tip-warn">{T.exportSingleImageTooLarge}</p>
+              )}
+              {exportPlan.failureReason === 'both-exceed' && (
+                <p className="tip tip-warn">{T.exportSizeTooLarge}</p>
+              )}
+              {!exportPlan.failureReason && exportPlan.segments.length > 1 && (
+                <p className="tip tip-warn">{T.exportSplitEstimate}：{exportPlan.segments.length} {T.exportSegmentUnit}</p>
+              )}
+            </>
           )}
         </aside>
       </section>
@@ -1659,24 +1908,46 @@ function App() {
         <a href="https://github.com/dodio12138/MergeCanvas" target="_blank" rel="noopener noreferrer">GitHub</a>
       </footer>
 
-      {toast && <div className="toast">{toast}</div>}
+      {toast && <div className={`toast${exportProgress || heicProgress ? ' toast-raised' : ''}`} role="status" aria-live="polite">{toast}</div>}
+      {exportProgress && (
+        <div className="export-progress" role="status" aria-live="polite" aria-label={exportProgress.phase === 'drawing' ? `${T.exportDrawing} ${exportProgress.done}/${exportProgress.total}` : T.exportEncoding}>
+          <span className="export-progress-label">
+            {exportProgress.phase === 'drawing'
+              ? `${T.exportDrawing} ${exportProgress.done}/${exportProgress.total}`
+              : T.exportEncoding}
+          </span>
+          <span className="export-progress-subtitle">
+            {exportProgress.partTotal > 1 ? `${T.exportSegment} ${exportProgress.partIndex}/${exportProgress.partTotal}` : ''}
+            {exportProgress.partTotal > 1 && exportProgress.currentName ? ' · ' : ''}
+            {exportProgress.currentName}
+          </span>
+          <div className="export-progress-bar-track" role="progressbar" aria-valuemin={0} aria-valuemax={exportProgress.total} aria-valuenow={exportProgress.done}>
+            <div
+              className={`export-progress-bar-fill${exportProgress.phase === 'encoding' ? ' is-indeterminate' : ''}`}
+              style={exportProgress.phase === 'drawing'
+                ? { width: `${Math.round((exportProgress.done / exportProgress.total) * 100)}%` }
+                : undefined}
+            />
+          </div>
+        </div>
+      )}
       {heicProgress && (
-        <div className="heic-progress">
+        <div className="heic-progress" role="status" aria-live="polite">
           <span className="heic-progress-label">{T.heicConverting} {heicProgress.done}/{heicProgress.total}</span>
-          <div className="heic-progress-bar-track">
+          <div className="heic-progress-bar-track" role="progressbar" aria-valuemin={0} aria-valuemax={heicProgress.total} aria-valuenow={heicProgress.done}>
             <div className="heic-progress-bar-fill" style={{ width: `${Math.round(heicProgress.done / heicProgress.total * 100)}%` }} />
           </div>
-          <button className="heic-progress-cancel" onClick={() => { heicAbortRef.current?.abort(); setHeicProgress(null) }}>Cancel</button>
+          <button className="heic-progress-cancel" onClick={() => { heicAbortRef.current?.abort(); setHeicProgress(null) }} aria-label={T.cancel}>{T.cancel}</button>
         </div>
       )}
       {showClearConfirm && (
         <div className="modal-overlay" onClick={() => setShowClearConfirm(false)}>
-          <div className="modal-box" onClick={(e) => e.stopPropagation()}>
-            <p className="modal-title">{T.confirmClear}</p>
-            <p className="modal-msg">{T.confirmClearMsg}</p>
+          <div className="modal-box" onClick={(e) => e.stopPropagation()} role="dialog" aria-modal="true" aria-labelledby="clear-confirm-title" aria-describedby="clear-confirm-msg">
+            <p className="modal-title" id="clear-confirm-title">{T.confirmClear}</p>
+            <p className="modal-msg" id="clear-confirm-msg">{T.confirmClearMsg}</p>
             <div className="modal-buttons">
-              <button className="btn-cancel" onClick={() => setShowClearConfirm(false)}>Cancel</button>
-              <button className="btn-danger" onClick={confirmClearAll}>Clear</button>
+              <button className="btn-cancel" onClick={() => setShowClearConfirm(false)}>{T.cancel}</button>
+              <button className="btn-danger" onClick={confirmClearAll}>{T.clear}</button>
             </div>
           </div>
         </div>
