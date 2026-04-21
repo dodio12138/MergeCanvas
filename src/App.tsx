@@ -1562,7 +1562,7 @@ function App() {
       <header className="top">
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
           <div className="brand">
-            <img className="web-logo" src={`${import.meta.env.BASE_URL}Logo.png`} alt="MergeCanvas" />
+            <img className="web-logo" src={`${import.meta.env.BASE_URL}logo.png`} alt="MergeCanvas" />
             <h1 className="brand-text">MergeCanvas</h1>
           </div>
           <button className="lang-toggle" onClick={() => setLang(lang === 'en' ? 'zh' : 'en')}>{lang === 'en' ? '中文' : 'EN'}</button>
